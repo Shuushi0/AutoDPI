@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>AutoDPI</title>
+<link rel="stylesheet" href="style.css?t={{TOKEN}}">
+</head>
+<body class="page st-unknown">
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="st-active" viewBox="0 0 24 24"><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1 4.7-1.5 8-5.2 8-10.1V5.8L12 2.5Z" fill="#fff"/><path d="m8.6 12.2 2.4 2.4 4.4-4.9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="st-half" viewBox="0 0 24 24"><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1Z" fill="#fff"/><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1 4.7-1.5 8-5.2 8-10.1V5.8L12 2.5Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="st-paused" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5" fill="#fff"/><path d="M9.2 8.3h2.1v7.4H9.2zM12.7 8.3h2.1v7.4h-2.1z" fill="currentColor"/></symbol>
+  <symbol id="st-offline" viewBox="0 0 24 24"><path d="M3.5 9.5a12.5 12.5 0 0 1 17 0M6.5 12.7a8 8 0 0 1 11 0M9.5 15.9a3.6 3.6 0 0 1 5 0" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="19" r="1.4" fill="#fff"/><path d="m5 4 14 16" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/><path d="m5 4 14 16" stroke="#fff" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="st-error" viewBox="0 0 24 24"><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1 4.7-1.5 8-5.2 8-10.1V5.8L12 2.5Z" fill="#fff"/><path d="M11 6.8h2v6.8h-2z" fill="currentColor"/><circle cx="12" cy="16.4" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="st-unreachable" viewBox="0 0 24 24"><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1 4.7-1.5 8-5.2 8-10.1V5.8L12 2.5Z" fill="#fff"/><path d="m5.5 4.5 13 15" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/><path d="m5.5 4.5 13 15" stroke="#fff" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.6v14H7zM13.4 5H17v14h-3.6z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></symbol>
+  <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0M5.8 12.5a9.2 9.2 0 0 1 12.4 0M9.2 16a4.2 4.2 0 0 1 5.6 0" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="19.6" r="1.7"/></symbol>
+  <symbol id="i-person" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 4.5a3.3 3.3 0 1 1 0 6.6 3.3 3.3 0 0 1 0-6.6Zm0 8c3 0 5.6 1.5 6.6 3.6A8.5 8.5 0 0 1 12 20.5a8.5 8.5 0 0 1-6.6-2.4c1-2.1 3.6-3.6 6.6-3.6Z"/></symbol>
+  <symbol id="i-seal" viewBox="0 0 24 24"><path d="M22.3 12 20.97 14.05 21.28 16.47 19.19 17.74 18.42 20.05 15.99 20.29 14.29 22.04 12 21.2 9.71 22.04 8.01 20.29 5.58 20.05 4.81 17.74 2.72 16.47 3.03 14.05 1.7 12 3.03 9.95 2.72 7.53 4.81 6.26 5.58 3.95 8.01 3.71 9.71 1.96 12 2.8 14.29 1.96 15.99 3.71 18.42 3.95 19.19 6.26 21.28 7.53 20.97 9.95Z"/><path d="m8.3 12.3 2.5 2.5 4.9-5.3" fill="none" stroke="var(--ko, #fff)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-failed" viewBox="0 0 24 24"><path d="M7.8 2h8.4L22 7.8v8.4L16.2 22H7.8L2 16.2V7.8z"/><path d="m8.5 8.5 7 7M15.5 8.5l-7 7" stroke="var(--ko, #fff)" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="k-repaired" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M7.6 10.8a4.6 4.6 0 0 1 8-2.2M16.4 13.2a4.6 4.6 0 0 1-8 2.2" fill="none" stroke="var(--ko, #fff)" stroke-width="1.8" stroke-linecap="round"/><path d="M16.6 5.6v3.6H13zM7.4 18.4v-3.6H11z" fill="var(--ko, #fff)"/></symbol>
+  <symbol id="k-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="m7.6 12.3 2.9 2.9 5.9-6.3" fill="none" stroke="var(--ko, #fff)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-plus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 7.2v9.6M7.2 12h9.6" stroke="var(--ko, #fff)" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="k-minus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M7.2 12h9.6" stroke="var(--ko, #fff)" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="k-waves" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.3"/><path d="M8.3 8.4a5.3 5.3 0 0 0 0 7.2M15.7 8.4a5.3 5.3 0 0 1 0 7.2M5.2 5.3a9.8 9.8 0 0 0 0 13.4M18.8 5.3a9.8 9.8 0 0 1 0 13.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="k-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M3 12h18M12 3c3.2 3.2 3.2 14.8 0 18M12 3c-3.2 3.2-3.2 14.8 0 18" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+  <symbol id="k-gear" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2 14 2.2 14.9 5 16.2 5.7 19.1 4.9 20.3 6.4 19 9.1 19.5 10.5 22 12 21.8 14 19 14.9 18.3 16.2 19.1 19.1 17.6 20.3 14.9 19 13.5 19.5 12 22 10 21.8 9.1 19 7.8 18.3 4.9 19.1 3.7 17.6 5 14.9 4.5 13.5 2 12 2.2 10 5 9.1 5.7 7.8 4.9 4.9 6.4 3.7 9.1 5 10.5 4.5ZM12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4Z"/></symbol>
+  <symbol id="k-bolt" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M5.5 10.8h6.6L10.6 7.2 18.5 13.2h-6.6l1.5 3.6z" fill="var(--ko, #fff)"/></symbol>
+  <symbol id="k-pause" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8.9 8h2.3v8H8.9zM12.8 8h2.3v8h-2.3z" fill="var(--ko, #fff)"/></symbol>
+  <symbol id="k-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.3 7.6v8.8l7-4.4z" fill="var(--ko, #fff)"/></symbol>
+  <symbol id="k-pulse" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M5.5 12.5h3l1.8-3.8 2.8 7 2-3.2h3.4" fill="none" stroke="var(--ko, #fff)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-ccw" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8.3 9.3a4.7 4.7 0 1 1-.5 4.6M7.3 6.6v3.4h3.4" fill="none" stroke="var(--ko, #fff)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></symbol>
+  <symbol id="k-cw" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M15.7 9.3a4.7 4.7 0 1 0 .5 4.6M16.7 6.6v3.4h-3.4" fill="none" stroke="var(--ko, #fff)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-power" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6.6v5.2M8.7 8.6a4.9 4.9 0 1 0 6.6 0" fill="none" stroke="var(--ko, #fff)" stroke-width="1.9" stroke-linecap="round"/></symbol>
+  <symbol id="k-update" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6.8v7.4M8.8 11.2l3.2 3.2 3.2-3.2M8.2 17h7.6" fill="none" stroke="var(--ko, #fff)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="k-trash" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M7.8 8.8h8.4M10.4 8.8V7.3h3.2v1.5M9.1 8.8l.6 7.6h4.6l.6-7.6" fill="none" stroke="var(--ko, #fff)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><circle cx="5" cy="7" r="1.5"/><circle cx="5" cy="12" r="1.5"/><circle cx="5" cy="17" r="1.5"/><path d="M9.5 7H20M9.5 12H20M9.5 17H20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 6h16M4 10h11M4 14h16M4 18h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="9" cy="7" r="2.4"/><circle cx="15" cy="12" r="2.4"/><circle cx="8" cy="17" r="2.4"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8M7.1 6.3a7 7 0 1 0 9.8 0" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2.6 1.5 20.8h21L12 2.6Zm-1 6.6h2v5.6h-2V9.2Zm0 7.2h2v2.1h-2v-2.1Z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.2" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="m15.2 15.2 5 5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 2.5 4 5.8v5.6c0 4.9 3.3 8.6 8 10.1 4.7-1.5 8-5.2 8-10.1V5.8L12 2.5Z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <span class="sbadge sm" aria-hidden="true"><svg><use id="badgeglyph" href="#st-half"/></svg></span>
+      <div class="brand-t"><h1>AutoDPI</h1><div id="badgetext" class="state" role="status" aria-live="polite">[[Bağlanıyor…|Connecting…]]</div></div>
+    </div>
+    <nav id="tabs" class="tabs" aria-label="[[Bölümler|Sections]]">
+      <a href="#overview" data-tab="overview">[[Genel bakış|Overview]]</a>
+      <a href="#list" data-tab="list">[[Liste|List]] <span id="n-list" class="n" hidden></span></a>
+      <a href="#settings" data-tab="settings">[[Ayarlar|Settings]]</a>
+      <a href="#maint" data-tab="maint">[[Bakım|Maintenance]]</a>
+      <a href="#log" data-tab="log">[[Günlük|Log]] <span id="n-log" class="n" hidden></span></a>
+    </nav>
+    <div class="tright">
+      <span id="updated" class="upd" title="[[Son güncelleme; sayfa 5 saniyede bir yenilenir|Last update; the page refreshes every 5 seconds]]"></span>
+      <button id="toggle" type="button" class="pill" disabled><svg aria-hidden="true"><use id="toggleglyph" href="#i-pause"/></svg><span id="toggletext">[[Duraklat|Pause]]</span></button>
+    </div>
+  </div>
+</header>
+
+<main>
+<!-- overview -->
+<section class="view" data-view="overview" aria-labelledby="herotitle">
+  <div id="updbanner" class="updnote" role="status" hidden>
+    <span class="ico blue"><svg><use href="#k-update"/></svg></span>
+    <div class="updnote-t"><b id="updtitle"></b><span id="updtext"></span></div>
+    <div id="updacts" class="updnote-a"></div>
+  </div>
+  <div id="hero" class="hero">
+    <div class="hero-top">
+      <span class="sbadge lg" aria-hidden="true"><svg><use id="herobadge" href="#st-half"/></svg></span>
+      <div class="hero-txt">
+        <h2 id="herotitle">[[Bağlanıyor…|Connecting…]]</h2>
+        <div id="herolead" class="lead"></div>
+        <div id="herodet" class="det" hidden></div>
+      </div>
+      <div id="herotiles" class="tiles">
+        <div class="tile"><b id="s-entries">-</b><span>[[Liste|List]]</span></div>
+        <div class="tile" title="[[Bu ağda doğrudan açılan, motora gerek duymayan alan adları|Names that open directly on this network, no engine needed]]"><b id="s-open">-</b><span>[[Açık alan adı|Open names]]</span></div>
+      </div>
+      <div id="herocta" class="cta" hidden>
+        <button id="heroresume" type="button" class="pill lg resume" hidden><svg aria-hidden="true"><use href="#i-play"/></svg>[[Sürdür|Resume]]</button>
+        <button id="heroretry" type="button" class="btn primary" hidden>[[Şimdi dene|Try now]]</button>
+      </div>
+    </div>
+    <div id="traffic" class="traffic">
+      <div class="traffic-h"><b>[[Trafik|Traffic]]</b><span>[[servis başladığından beri|since the service started]]</span></div>
+      <div id="o-bar" class="fbar" aria-hidden="true"><i class="b-direct"></i><i class="b-fb"></i><i class="b-pass"></i></div>
+      <div class="legend">
+        <div><b id="o-conns">-</b><span>[[Bağlantı|Connections]]</span></div>
+        <div><b id="o-direct" class="kc-green">-</b><span><i class="sw b-direct"></i>[[Direkt|Direct]]</span></div>
+        <div><b id="o-fallback" class="kc-blue">-</b><span><i class="sw b-fb"></i>[[Motor ile|Via engine]]</span></div>
+        <div><b id="o-pass">-</b><span><i class="sw b-pass"></i>[[Geçiş|Passed through]]</span></div>
+      </div>
+    </div>
+  </div>
+
+  <article class="card s4 trio">
+    <div class="card-h"><span class="ico blue"><svg><use href="#i-wifi"/></svg></span><h3>[[Şu anki ağ|Current network]]</h3><span class="aside"><span id="s-online" class="tag" hidden></span></span></div>
+    <div id="s-netlabel" class="big">-</div>
+    <dl class="kv">
+      <dt>[[Arayüz|Interface]]</dt><dd id="s-iface">-</dd>
+      <dt>[[Ağ geçidi|Gateway]]</dt><dd id="s-gw">-</dd>
+      <dt>[[Anahtar|Key]]</dt><dd id="s-key" class="mono">-</dd>
+    </dl>
+  </article>
+  <article class="card s4 trio">
+    <div class="card-h"><span class="ico purple"><svg><use href="#k-gear"/></svg></span><h3>[[Motorlar|Engines]]</h3><span class="aside"><a class="link" href="#settings">[[Sırayı değiştir|Change order]]<svg aria-hidden="true"><use href="#i-chev"/></svg></a></span></div>
+    <ol id="s-engines" class="chain" aria-label="[[Deneme sırası|Order of trial]]"></ol>
+    <dl class="kv">
+      <dt>[[Sahte SNI|Decoy SNI]]</dt><dd id="c-sni" class="mono">-</dd>
+      <dt>[[Yedek motor gecikmesi|Hedge delay]]</dt><dd id="c-hedge">-</dd>
+      <dt>[[Yeniden test|Re-test]]</dt><dd id="c-retest">-</dd>
+    </dl>
+  </article>
+  <article class="card s4 trio svc">
+    <div class="card-h"><span class="ico gray"><svg><use href="#i-cpu"/></svg></span><h3>[[Servis|Service]]</h3><span class="aside"><a class="link" href="#maint">[[Bakım|Maintenance]]<svg aria-hidden="true"><use href="#i-chev"/></svg></a></span></div>
+    <dl class="kv">
+      <dt>[[Sürüm|Version]]</dt><dd id="s-version">-</dd>
+      <dt>PID</dt><dd><span id="s-pid">-</span> <span id="s-sbpid" class="muted"></span></dd>
+      <dt>[[Çalışma süresi|Uptime]]</dt><dd id="s-uptime">-</dd>
+      <dt>[[Güncelleme|Update]]</dt><dd id="s-update">-</dd>
+      <dt>[[Ayar dosyası|Config file]]</dt><dd id="s-cfgpath" class="mono small">-</dd>
+    </dl>
+  </article>
+
+  <article class="card s6 pair">
+    <div class="card-h"><span class="ico green"><svg><use href="#i-list"/></svg></span><h3>[[Öğrenilen liste|Learned list]]</h3><span class="aside"><span id="p-listcount"></span><a class="btn sm" href="#list" data-focus="adddomain"><svg aria-hidden="true"><use href="#i-plus"/></svg>[[Ekle|Add]]</a></span></div>
+    <ul id="p-list" class="rows"></ul>
+    <div class="card-f"><span>[[en son eklenenler üstte|most recently added first]]</span><a class="link" href="#list">[[Tüm liste|Whole list]]<svg aria-hidden="true"><use href="#i-chev"/></svg></a></div>
+  </article>
+  <article class="card s6 pair">
+    <div class="card-h"><span class="ico teal"><svg><use href="#i-text"/></svg></span><h3>[[Son olaylar|Recent events]]</h3><span id="p-logcount" class="aside"></span></div>
+    <ul id="p-log" class="rows"></ul>
+    <div class="card-f"><span>[[en yeniler üstte|newest first]]</span><a class="link" href="#log">[[Tüm günlük|Whole log]]<svg aria-hidden="true"><use href="#i-chev"/></svg></a></div>
+  </article>
+</section>
+
+<!-- learned list -->
+<section class="view" data-view="list" aria-labelledby="h-list" hidden>
+  <div class="vh"><h2 id="h-list">[[Öğrenilen liste|Learned list]]</h2><span id="l-count" class="muted"></span></div>
+  <article class="card s12">
+    <form id="addform" class="addbar">
+      <label for="adddomain" class="addlbl">[[Site ekle|Add a site]]</label>
+      <input id="adddomain" class="grow" placeholder="[[alan-adi.com|domain.com]]" autocomplete="off" spellcheck="false" required>
+      <select id="addengine" aria-label="[[Motor|Engine]]"><option value="">[[varsayılan motor|default engine]]</option></select>
+      <button type="submit" class="btn primary"><svg aria-hidden="true"><use href="#i-plus"/></svg>[[Ekle|Add]]</button>
+      <span class="hint">[[Elle eklenenler kendiliğinden yeniden sınanmaz.|Manual entries are not re-tested on their own.]]</span>
+    </form>
+  </article>
+  <article class="card s12">
+    <div class="toolbar">
+      <div class="search grow"><svg aria-hidden="true"><use href="#i-search"/></svg><input id="lsearch" type="search" placeholder="[[Listede ara…|Search the list…]]" autocomplete="off" spellcheck="false" aria-label="[[Listede ara|Search the list]]"></div>
+      <div id="lscope" class="seg" role="group" aria-label="[[Kapsam|Scope]]">
+        <button type="button" data-scope="current" class="on">[[Bu ağ|This network]]</button>
+        <button type="button" data-scope="all">[[Tüm ağlar|All networks]]</button>
+      </div>
+      <select id="lsource" aria-label="[[Kaynak|Source]]">
+        <option value="">[[tüm kaynaklar|all sources]]</option>
+        <option value="auto">[[otomatik|automatic]]</option>
+        <option value="manual">[[elle|manual]]</option>
+      </select>
+    </div>
+    <div class="tablewrap">
+      <table id="ltable" class="tbl one-net">
+        <thead><tr>
+          <th><button type="button" data-sort="domain">[[Alan adı|Domain]]</button></th>
+          <th class="net"><button type="button" data-sort="net">[[Ağ|Network]]</button></th>
+          <th><button type="button" data-sort="engine">[[Motor|Engine]]</button></th>
+          <th class="src"><button type="button" data-sort="source">[[Kaynak|Source]]</button></th>
+          <th class="wide"><button type="button" data-sort="status">[[Son kontrol|Last check]]</button></th>
+          <th class="wide"><button type="button" data-sort="added">[[Eklenme|Added]]</button></th>
+          <th class="act"><span class="sr">[[İşlem|Action]]</span></th>
+        </tr></thead>
+        <tbody id="lbody"></tbody>
+      </table>
+    </div>
+  </article>
+</section>
+
+<!-- settings -->
+<section class="view" data-view="settings" aria-labelledby="h-cfg" hidden>
+  <div class="vh"><h2 id="h-cfg">[[Ayarlar|Settings]]</h2><code id="cfgpath" class="muted small"></code></div>
+  <form id="cfgform" class="s12 cfg">
+    <div class="stack">
+      <article class="card">
+        <div class="card-h"><span class="ico purple"><svg><use href="#k-gear"/></svg></span><h3><label for="engineadd">[[Motor sırası|Engine order]]</label></h3></div>
+        <p class="fhelp lead-help">[[Engelli bir site için motorlar yukarıdan aşağı denenir.|For a blocked site the engines are tried top to bottom.]]</p>
+        <ol id="engines" class="engines"></ol>
+        <div class="addbar engadd"><select id="engineadd" class="grow" aria-label="[[Eklenecek motor|Engine to add]]"></select><button id="engineaddbtn" type="button" class="btn"><svg aria-hidden="true"><use href="#i-plus"/></svg>[[Motor ekle|Add engine]]</button></div>
+      </article>
+      <article class="card">
+        <div class="card-h"><span class="ico blue"><svg><use href="#k-update"/></svg></span><h3>[[Güncellemeler|Updates]]</h3></div>
+        <label class="swrow"><span class="t"><b>[[Güncellemeleri otomatik yükle|Install updates automatically]]</b><small>[[Yeni sürüm indirilir, imzası doğrulanır ve bağlantı boşta kalınca kurulur. Kapalıyken yalnızca duyurulur.|A new version is downloaded, its signature checked, and it installs once the connection is idle. Off, it is only announced.]] <code>auto_update</code></small></span><input id="auto_update" type="checkbox" class="sw-in"><span class="track" aria-hidden="true"></span></label>
+        <div class="field updfield">
+          <label for="update_check_hours" class="ftitle">[[Güncellemeleri denetle|Check for updates]] <code>update_check_hours</code></label>
+          <select id="update_check_hours">
+            <option value="6">[[6 saatte bir|Every 6 hours]]</option>
+            <option value="24">[[Günde bir|Once a day]]</option>
+            <option value="168">[[Haftada bir|Once a week]]</option>
+            <option value="0">[[Yalnızca istenince|Only when asked]]</option>
+          </select>
+          <p class="fhelp">[[Bu iki ayar servisi yeniden başlatmadan uygulanır.|These two settings apply without restarting the service.]]</p>
+        </div>
+        <div class="updcheckrow">
+          <p id="updstate" class="fhelp updstate"></p>
+          <p id="updresult" class="updresult" role="status" hidden></p>
+          <button id="updcheck" type="button" class="btn sm">[[Şimdi denetle|Check now]]</button>
+        </div>
+      </article>
+    </div>
+    <div class="stack">
+      <article class="card">
+        <div class="card-h"><span class="ico indigo"><svg><use href="#i-sliders"/></svg></span><h3>[[Değerler|Values]]</h3></div>
+        <div class="fgrid">
+          <div class="field">
+            <label for="spoof_sni" class="ftitle">[[Sahte SNI|Decoy SNI]] <code>spoof_sni</code></label>
+            <input id="spoof_sni" spellcheck="false" autocomplete="off">
+            <p class="fhelp">[[tlsspoof'un gerçek addan önce gönderdiği ad; DPI'ın geçirdiği bir ad olmalı.|The name tlsspoof sends ahead of the real one; it must be a name the DPI lets through.]]</p>
+          </div>
+          <div class="field">
+            <label for="language" class="ftitle">[[Dil|Language]] <code>language</code></label>
+            <select id="language">
+              <option value="">[[Sistem dili|System language]]</option>
+              <option value="tr">Türkçe</option>
+              <option value="en">English</option>
+            </select>
+            <p class="fhelp">[[Kaydedince sayfa bu dilde açılır.|Once saved the page opens in this language.]]</p>
+          </div>
+          <div class="field">
+            <label for="retest_hours" class="ftitle">[[Yeniden test aralığı, saat|Re-test interval, hours]] <code>retest_hours</code></label>
+            <input id="retest_hours" type="number" min="1">
+            <p class="fhelp">[[Listedeki siteler engel kalktı mı diye bu aralıkla sınanır.|Listed sites are checked this often for a lifted block.]]</p>
+          </div>
+          <div class="field">
+            <label for="hedge_ms" class="ftitle">[[Yedek motor gecikmesi, ms|Hedge delay, ms]] <code>hedge_ms</code></label>
+            <input id="hedge_ms" type="number" min="50">
+            <p class="fhelp">[[Gerçek yol bu süreden yavaşsa sıradaki motor da paralel başlar.|When the real path is slower than this, the next engine starts alongside it.]]</p>
+          </div>
+          <div class="field">
+            <label for="local_domains" class="ftitle">[[Yerel alan adları|Local domains]] <code>local_domains</code></label>
+            <input id="local_domains" spellcheck="false" autocomplete="off" placeholder="corp.example.com, intranet.okul.edu.tr">
+            <p class="fhelp">[[Bu adların DNS soruları ağın kendi DNS'ine gider (şirket, okul ağları). .local, .lan, .corp, .internal ve tek kelimelik adlar zaten öyle.|DNS questions for these names go to the network's own DNS (company or school networks). .local, .lan, .corp, .internal and single-word names already do.]]</p>
+          </div>
+        </div>
+      </article>
+      <article class="card">
+        <div class="card-h"><span class="ico green"><svg><use href="#i-shield"/></svg></span><h3>[[Seçenekler|Options]]</h3></div>
+        <label class="swrow"><span class="t"><b>[[DNS devralma|DNS takeover]]</b><small>[[Yakalama açıkken sistemin DNS'i 1.1.1.1'e yönlenir.|While the capture is up the system resolver points at 1.1.1.1.]] <code>dns_takeover</code></small></span><input id="dns_takeover" type="checkbox" class="sw-in"><span class="track" aria-hidden="true"></span></label>
+        <label class="swrow"><span class="t"><b>[[QUIC engelle|Block QUIC]]</b><small>[[Listedeki sitelere QUIC (UDP/443) reddedilir; uygulamalar motorların çalıştığı TCP'ye düşer.|QUIC (UDP/443) to listed sites is refused, so their apps fall back to TCP, where the engines work.]] <code>block_quic</code></small></span><input id="block_quic" type="checkbox" class="sw-in"><span class="track" aria-hidden="true"></span></label>
+        <label class="swrow"><span class="t"><b>[[Sessiz engelde tüm motorlar|All engines on silent blocks]]</b><small>[[Yanıtsız kalan bağlantıda yalnız ilk motor değil, sıradaki motorlar da denenir. Paketleri sessizce düşüren ağlar için; yavaş bağlantılarda trafiği artırır.|A flow that only times out tries every engine, not just the first. For networks that drop packets silently; adds traffic on slow links.]] <code>escalate_on_silence</code></small></span><input id="escalate_on_silence" type="checkbox" class="sw-in"><span class="track" aria-hidden="true"></span></label>
+      </article>
+    </div>
+    <div id="savebar" class="savebar">
+      <span id="dirtytext" class="dirty">[[Değişiklik yok|No changes]]</span>
+      <span class="hint">[[Kaydetmek yönetici izni ister; uygulanması için servisi yeniden başlatın (Bakım). Dil hemen değişir.|Saving asks for administrator permission; restart the service (Maintenance) to apply it. The language changes at once.]]</span>
+      <button id="cfgreset" type="button" class="btn" disabled>[[Geri al|Revert]]</button>
+      <button id="cfgsave" type="submit" class="btn primary" disabled>[[Kaydet|Save]]</button>
+    </div>
+  </form>
+</section>
+
+<!-- maintenance -->
+<section class="view" data-view="maint" aria-labelledby="h-maint" hidden>
+  <div class="vh"><h2 id="h-maint">[[Bakım|Maintenance]]</h2><span class="muted">[[Yönetici izni gerekmez; işi servis yapar.|No administrator permission needed; the service does it.]]</span></div>
+  <article class="card s6">
+    <div class="card-h"><span class="ico teal"><svg><use href="#k-waves"/></svg></span><h3>[[Ağ ve liste|Network and list]]</h3></div>
+    <ul id="maint-net" class="mlist"></ul>
+  </article>
+  <div class="s6 stack">
+    <article class="card">
+      <div class="card-h"><span class="ico gray"><svg><use href="#i-cpu"/></svg></span><h3>[[Servis|Service]]</h3><span id="m-svc" class="aside"></span></div>
+      <ul id="maint-svc" class="mlist"></ul>
+    </article>
+    <article class="card danger">
+      <div class="card-h"><span class="ico red"><svg><use href="#i-warn"/></svg></span><h3>[[Sıfırlama|Reset]]</h3><span class="aside">[[elle eklediklerin kalır|your manual entries stay]]</span></div>
+      <ul id="maint-reset" class="mlist"></ul>
+    </article>
+  </div>
+</section>
+
+<!-- log -->
+<section class="view" data-view="log" aria-labelledby="h-log" hidden>
+  <div class="vh"><h2 id="h-log">[[Günlük|Log]]</h2><span id="g-count" class="muted"></span><span class="end"><button id="logclear" type="button" class="btn sm danger" title="[[Servis günlüğü, çökme günlüğü ve bu olay kaydı silinir|Deletes the service log, the crash log and this event journal]]"><svg aria-hidden="true"><use href="#i-trash"/></svg>[[Günlükleri temizle|Clear logs]]</button></span></div>
+  <article class="card s12">
+    <div class="toolbar"><div class="search grow"><svg aria-hidden="true"><use href="#i-search"/></svg><input id="gsearch" type="search" placeholder="[[Günlükte ara…|Search the log…]]" autocomplete="off" spellcheck="false" aria-label="[[Günlükte ara|Search the log]]"></div></div>
+    <div id="gkinds" class="kinds" role="group" aria-label="[[Olay türü|Event kind]]"></div>
+    <div id="log" class="loglist"></div>
+  </article>
+</section>
+</main>
+
+<div id="msg" class="toast" role="alert" hidden>
+  <span class="ti" aria-hidden="true"><svg><use id="msgglyph" href="#k-check"/></svg></span>
+  <span id="msgtext"></span>
+  <button id="msgclose" type="button" class="x" aria-label="[[Kapat|Close]]"><svg aria-hidden="true"><use href="#i-x"/></svg></button>
+</div>
+<footer class="foot">AutoDPI <span id="f-version"></span> &middot; [[yerel ayar sayfası|local settings page]] &middot; [[yalnızca bu bilgisayardan erişilir|reachable from this computer only]]</footer>
+<script src="common.js?t={{TOKEN}}"></script>
+<script src="app.js?t={{TOKEN}}"></script>
+</body>
+</html>

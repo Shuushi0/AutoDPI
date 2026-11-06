@@ -1,0 +1,21 @@
+# helper binaries are fetched/built by scripts/fetch-bins.sh, never committed
+/bin/*
+!/bin/.gitkeep
+/internal/embedded/payload/*
+!/internal/embedded/payload/.gitkeep
+# written by scripts/build.sh and build-windows.sh next to the payload
+/internal/embedded/payload_hashes*_gen.go
+# build output: scripts/*.sh write to dist/ (release archives in dist/release/)
+/dist/
+# a plain `go build ./cmd/...` in the repository root
+/autodpi
+/autodpi-tray
+*.exe
+# the icon tool run by hand (macos-app/tools/make-icon.swift)
+*.iconset/
+*.icns
+# go test -c, profiles and coverage
+*.test
+*.prof
+*.out
+.DS_Store
