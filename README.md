@@ -17,9 +17,8 @@ Download the archive for your system from the [Releases page](https://github.com
 ```bash
 unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*
 xattr -dr com.apple.quarantine .        # the binaries are not notarized
-sudo ./autodpi install                  # root launchd daemon, starts at boot
+sudo ./autodpi install                  # root launchd daemon, starts at boot, and the menu bar app
 autodpi status
-cp -R AutoDPI.app /Applications/ && open /Applications/AutoDPI.app   # optional menu bar app
 ```
 
 Remove it with `sudo autodpi uninstall [--purge]` (`--purge` also deletes the learned lists).

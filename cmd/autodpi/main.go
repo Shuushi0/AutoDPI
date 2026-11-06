@@ -308,9 +308,9 @@ func install(args []string) {
 	fmt.Println(i18n.T("kuruldu. Durum için: autodpi status   ·   günlük: ", "installed. State: autodpi status   ·   log: ") + service.LogPath(p))
 	switch err := service.InstallTray(p, self()); {
 	case err == nil:
-		fmt.Println(i18n.T("tepsi simgesi kuruldu: her oturum açılışında başlar; şimdi açmak için Başlat menüsünde AutoDPI", "tray icon installed: it starts at every sign-in; open AutoDPI from the Start menu to start it now"))
+		fmt.Println(service.TrayInstalledText())
 	case !errors.Is(err, service.ErrTrayAbsent):
-		fmt.Fprintf(os.Stderr, i18n.T("uyarı: tepsi simgesi kurulamadı (servis kuruldu ve çalışıyor): %v\n", "warning: the tray icon was not installed (the service is installed and running): %v\n"), err)
+		fmt.Fprintf(os.Stderr, i18n.T("uyarı: %s (servis kuruldu ve çalışıyor): %v\n", "warning: %s (the service is installed and running): %v\n"), service.TrayFailedText(), err)
 	}
 }
 

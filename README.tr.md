@@ -17,9 +17,8 @@ English: [README.md](README.md)
 ```bash
 unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*
 xattr -dr com.apple.quarantine .        # dosyalar Apple tarafından notarize edilmedi
-sudo ./autodpi install                  # root launchd servisi, açılışta başlar
+sudo ./autodpi install                  # açılışta başlayan root launchd servisi ve menü çubuğu uygulaması
 autodpi status
-cp -R AutoDPI.app /Applications/ && open /Applications/AutoDPI.app   # isteğe bağlı menü çubuğu uygulaması
 ```
 
 Kaldırmak için `sudo autodpi uninstall [--purge]` (`--purge` öğrenilen listeleri de siler).

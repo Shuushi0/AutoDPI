@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `sudo autodpi install` on macOS now also puts `AutoDPI.app` from the same folder into `/Applications` and
+  opens it. There is no separate copy step any more.
+
 ## 0.1.1 — 2026-11-06
 
 **System audit**

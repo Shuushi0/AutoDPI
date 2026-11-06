@@ -8,10 +8,9 @@ import (
 	"github.com/Shuushi0/AutoDPI/internal/i18n"
 )
 
-// ErrTrayAbsent is InstallTray's answer when there is no tray app to install:
-// the folder install ran from has no autodpi-tray.exe, or the platform has
-// none (the macOS menu bar app is copied to /Applications by hand).
-var ErrTrayAbsent = errors.New("autodpi-tray.exe missing")
+// ErrTrayAbsent is InstallTray's answer when there is no app to install: the
+// folder install ran from has no autodpi-tray.exe or AutoDPI.app.
+var ErrTrayAbsent = errors.New("the app is not next to autodpi")
 
 // stateText is a job's state as the service manager names it ("running",
 // "stopped", ...) in the user's language, the way doctor shows it.

@@ -29,6 +29,16 @@ const (
 // TrayPath is where the tray app is installed.
 func TrayPath(p paths.Set) string { return filepath.Join(p.Support, trayName) }
 
+// TrayInstalledText is what install says once the tray app is in place.
+func TrayInstalledText() string {
+	return i18n.T("tepsi simgesi kuruldu: her oturum açılışında başlar; şimdi açmak için Başlat menüsünde AutoDPI", "tray icon installed: it starts at every sign-in; open AutoDPI from the Start menu to start it now")
+}
+
+// TrayFailedText is install's warning when the tray app could not be put in place.
+func TrayFailedText() string {
+	return i18n.T("tepsi simgesi kurulamadı", "the tray icon was not installed")
+}
+
 // InstallTray copies autodpi-tray.exe from next to self, registers it to
 // start at sign-in (with --autostart, so a user who hid the icon is left
 // alone) and creates the Start menu entry, which also brings a hidden icon

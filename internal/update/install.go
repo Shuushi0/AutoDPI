@@ -151,6 +151,34 @@ func Apply(p paths.Set, st Staged, from string, s *State) error {
 	return nil
 }
 
+// ReplaceTree puts a copy of src at dst in one step, keeping the owner of the
+// copy it replaces. On an error dst is as it was.
+func ReplaceTree(src, dst string) error {
+	fresh, old := newPath(dst), oldPath(dst)
+	_ = os.RemoveAll(fresh)
+	if err := copyTree(src, fresh); err != nil {
+		_ = os.RemoveAll(fresh)
+		return err
+	}
+	matchOwner(dst, fresh)
+	_ = os.RemoveAll(old)
+	err := os.Rename(dst, old)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = os.RemoveAll(fresh)
+		return fmt.Errorf("move %s aside: %w", dst, err)
+	}
+	existed := err == nil
+	if err := os.Rename(fresh, dst); err != nil {
+		if existed {
+			_ = os.Rename(old, dst)
+		}
+		_ = os.RemoveAll(fresh)
+		return fmt.Errorf("put the new %s in place: %w", filepath.Base(dst), err)
+	}
+	_ = os.RemoveAll(old)
+	return nil
+}
+
 func undo(done []target) {
 	for _, t := range done {
 		_ = os.RemoveAll(t.dst)
