@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/Shuushi0/AutoDPI/internal/config"
 	"github.com/Shuushi0/AutoDPI/internal/i18n"
@@ -18,11 +20,20 @@ import (
 // MergeConfig applies in over the existing config file, keeping every key the
 // page does not edit (ciadpi_args, warp_profile, ...), and validates the result
 // with the same rules the daemon uses. It returns the JSON to write.
+//
+// An existing file the service cannot use (it does not parse, or holds a
+// value the service refuses) is what the service already ignores, running on
+// the defaults. The save then starts from an empty file: keeping its keys
+// would keep the refused value, and every save would fail on something the
+// page cannot edit. The caller keeps the old file (Unusable, KeepOld).
 func MergeConfig(path string, in Settings) ([]byte, error) {
 	raw := map[string]json.RawMessage{}
+	var had []string // the local_domains the file already holds
 	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &raw); err != nil {
-			return nil, fmt.Errorf(i18n.T("mevcut config.json okunamadı: %v", "the current config.json does not parse: %v"), err)
+		if cur, perr := config.Parse(b); perr != nil || json.Unmarshal(b, &raw) != nil {
+			raw = map[string]json.RawMessage{}
+		} else {
+			had = cur.LocalDomains
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -40,6 +51,16 @@ func MergeConfig(path string, in Settings) ([]byte, error) {
 	set("dns_takeover", in.DNSTakeover)
 	set("block_quic", in.BlockQUIC)
 	set("escalate_on_silence", in.Escalate)
+	for i, d := range in.Local {
+		in.Local[i] = config.NormalizeSuffix(d) // as it is matched (see config.parse)
+		// An entry the user adds must not be a public suffix; one the file
+		// already had stays theirs.
+		if !slices.Contains(had, in.Local[i]) {
+			if err := config.CheckLocalDomain(in.Local[i]); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if len(in.Local) == 0 {
 		delete(raw, "local_domains")
 	} else {
@@ -47,7 +68,11 @@ func MergeConfig(path string, in Settings) ([]byte, error) {
 	}
 	set("retest_hours", in.RetestHours)
 	set("hedge_ms", in.HedgeMS)
-	set("auto_update", in.AutoUpdate)
+	for k := range raw {
+		if config.Retired(k) {
+			delete(raw, k) // a setting of an earlier version that nothing reads any more
+		}
+	}
 	set("update_check_hours", in.UpdateHours)
 	if in.Language == "" {
 		delete(raw, "language") // the system's: no key at all, as in a fresh file
@@ -61,41 +86,47 @@ func MergeConfig(path string, in Settings) ([]byte, error) {
 	}
 	merged = append(merged, '\n')
 
-	c := config.Default()
-	if err := json.Unmarshal(merged, &c); err != nil {
-		return nil, err
-	}
-	if err := c.Validate(); err != nil {
-		return nil, err
-	}
 	if in.SpoofSNI == "" {
 		return nil, errors.New(i18n.T("spoof_sni boş olamaz", "spoof_sni must not be empty"))
 	}
-	if !validHostname(in.SpoofSNI) {
+	if !config.ValidHostname(in.SpoofSNI) {
 		return nil, errors.New(i18n.T("spoof_sni geçerli bir alan adı değil (en çok 253 karakter, etiketler 1-63 karakter: harf, rakam, tire)", "spoof_sni is not a valid domain name (at most 253 characters, labels of 1-63 letters, digits or hyphens)"))
+	}
+	// As the service will read it.
+	if _, err := config.Parse(merged); err != nil {
+		return nil, err
 	}
 	return merged, nil
 }
 
-// validHostname reports whether s is a DNS name: at most 253 bytes, dot
-// separated labels of 1 to 63 letters, digits, '-' or '_', none starting or
-// ending with '-'.
-func validHostname(s string) bool {
-	if s == "" || len(s) > 253 {
-		return false
+// Unusable returns the contents of the config file at path when the service
+// cannot use it (it does not parse or fails validation), nil otherwise.
+func Unusable(path string) []byte {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
 	}
-	for _, l := range strings.Split(s, ".") {
-		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-			return false
-		}
-		for i := 0; i < len(l); i++ {
-			c := l[i]
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-				return false
-			}
+	if _, err := config.Parse(b); err == nil {
+		return nil
+	}
+	return b
+}
+
+// KeepOld saves what a config file held before a save replaced it, and
+// returns where: beside the file when this user may write there, else in the
+// temporary folder (a real install's folder is root's or the
+// administrators'). Each copy has a name of its own, so a later one does not
+// replace an earlier one that may still be wanted. "" when it could not be
+// kept anywhere.
+func KeepOld(path string, old []byte) string {
+	name := filepath.Base(path) + ".broken-" + time.Now().Format("20060102-150405")
+	for _, dir := range []string{filepath.Dir(path), os.TempDir()} {
+		f := filepath.Join(dir, name)
+		if os.WriteFile(f, old, 0o600) == nil {
+			return f
 		}
 	}
-	return true
+	return ""
 }
 
 // goos selects the platform behaviour; tests override it.
@@ -140,6 +171,11 @@ func writeTemp(dir, pattern string, data []byte) (string, error) {
 		return "", err
 	}
 	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err := f.Sync(); err != nil { // before the rename: see fsx
 		f.Close()
 		os.Remove(f.Name())
 		return "", err

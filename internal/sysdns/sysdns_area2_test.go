@@ -47,24 +47,93 @@ func TestArea2Bug_SavedServiceGoneWedgesTakeForever(t *testing.T) {
 	}
 }
 
-// An unreadable record is never acted on (good) but also never cleared: Take
-// and Release both fail until someone deletes the file by hand.
-func TestArea2_CorruptRecordLeavesSettingsAloneButBlocksTake(t *testing.T) {
-	m, f := rig(t)
-	f.dns["Wi-Fi"] = []string{"9.9.9.9"}
+// An unreadable record (half a file after a power cut) is never acted on. It
+// used to block Take and Release until someone deleted the file by hand, with
+// the service showing "active" on the router's own DNS all the while. It is
+// set aside, and the next Take records the settings as they are.
+func TestArea2_CorruptRecordIsSetAsideAndTakeWorksAgain(t *testing.T) {
 	for _, bad := range []string{"", "{", `{"service":""}`, "null"} {
+		m, f := rig(t)
+		f.dns["Wi-Fi"] = []string{"9.9.9.9"}
 		if err := os.WriteFile(m.File, []byte(bad), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.Release(); err == nil && bad != "null" {
-			t.Errorf("%q: Release should report the unreadable record", bad)
-		}
-		if err := m.Take("en0"); err == nil {
-			t.Errorf("%q: Take proceeded over an unreadable record", bad)
+		if err := m.Release(); err != nil {
+			t.Errorf("%q: Release: %v", bad, err)
 		}
 		if !slices.Equal(f.dns["Wi-Fi"], []string{"9.9.9.9"}) || f.sets != 0 {
-			t.Fatalf("%q: settings modified (%v, sets=%d)", bad, f.dns, f.sets)
+			t.Fatalf("%q: an unreadable record was acted on (%v, sets=%d)", bad, f.dns, f.sets)
 		}
+		if _, err := os.Stat(m.File + ".unreadable"); err != nil {
+			t.Errorf("%q: the unreadable record was not kept aside: %v", bad, err)
+		}
+		if err := m.Take("en0"); err != nil {
+			t.Fatalf("%q: Take: %v", bad, err)
+		}
+		if !slices.Equal(f.dns["Wi-Fi"], []string{Capture}) || !m.Holding() {
+			t.Fatalf("%q: resolver not taken: %v", bad, f.dns)
+		}
+		if err := m.Release(); err != nil || !slices.Equal(f.dns["Wi-Fi"], []string{"9.9.9.9"}) {
+			t.Fatalf("%q: the user's own resolver is not back: %v (%v)", bad, f.dns, err)
+		}
+	}
+}
+
+// The record is lost (unreadable, set aside) while the resolver is still ours
+// from an earlier run. What is recorded then must not be our own address, or
+// giving it "back" would leave it there for good: the network's own setting
+// is what to return to.
+func TestArea2_ALostRecordDoesNotMakeOurAddressTheOriginal(t *testing.T) {
+	m, f := rig(t)
+	f.dns["Wi-Fi"] = []string{Capture}
+	if err := os.WriteFile(m.File, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Take("en0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.dns["Wi-Fi"]; len(got) != 0 {
+		t.Fatalf("resolver after release = %v, want the network's own (none set)", got)
+	}
+}
+
+// The same address set by the user's own hand (common where the provider's
+// resolver lies) is theirs: it goes back exactly as it was.
+func TestArea2_AHandSetCloudflareResolverIsGivenBack(t *testing.T) {
+	m, f := rig(t)
+	f.dns["Wi-Fi"] = []string{Capture}
+	if err := m.Take("en0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.dns["Wi-Fi"]; !slices.Equal(got, []string{Capture}) {
+		t.Fatalf("resolver after release = %v, want the user's own %s back", got, Capture)
+	}
+}
+
+// A record left by a run that could not give the resolver back, and the user
+// has set something else since: the old setting must not be put over theirs.
+func TestArea2_AStaleRecordDoesNotUndoWhatTheUserSetLater(t *testing.T) {
+	m, f := rig(t)
+	f.dns["Wi-Fi"] = []string{"192.168.1.1"}
+	if err := m.Take("en0"); err != nil {
+		t.Fatal(err)
+	}
+	f.dns["Wi-Fi"] = []string{"9.9.9.9"} // by hand, while the record was still there
+	sets := f.sets
+	if err := m.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.dns["Wi-Fi"], []string{"9.9.9.9"}) || f.sets != sets {
+		t.Fatalf("the user's later setting was overwritten: %v (sets %d → %d)", f.dns, sets, f.sets)
+	}
+	if m.Holding() {
+		t.Fatal("the stale record is still there")
 	}
 }
 

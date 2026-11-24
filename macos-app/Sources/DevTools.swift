@@ -215,7 +215,7 @@ enum DevTools {
             shot("paused-light", store: paused, tab: .log, dark: false)
             shot("standby-dark", store: standby, tab: .log, dark: true)
             shot("unreachable-light", store: down, tab: .log, dark: false)
-            let json = #"{"current":"0.1.0","latest":"0.1.1","url":"","phase":"ready","auto":true,"supported":true}"#
+            let json = #"{"current":"0.1.0","latest":"0.1.1","url":"","phase":"ready","supported":true}"#
             if let info = try? JSONDecoder().decode(UpdateInfo.self, from: Data(json.utf8)) {
                 var st = sampleStatus(state: "active")
                 st.update = info

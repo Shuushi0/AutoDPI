@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/Shuushi0/AutoDPI/internal/paths"
 	"github.com/Shuushi0/AutoDPI/internal/sysdns"
 	"github.com/Shuushi0/AutoDPI/internal/sysx"
+	"github.com/Shuushi0/AutoDPI/internal/update"
 )
 
 // Kind names the service manager entry in doctor's output.
@@ -67,17 +69,47 @@ func Install(p paths.Set, self string) error {
 	defer m.Disconnect()
 
 	args := []string{"daemon", "--log-file", p.Log}
+	recovered := false
 	s, err := m.OpenService(paths.ServiceName)
 	if err == nil {
 		defer s.Close()
-		// The running binary is locked: stop it before replacing it.
-		if err := stopAndWait(s, 30*time.Second); err != nil {
+		// A service that keeps crashing is what people reinstall over. In the
+		// ten seconds before the service manager starts it again it reads as
+		// stopped, and the restart would then land in the middle of the swap:
+		// no restarts until the new files are in place. And whatever goes
+		// wrong before they are set again, the service is not left without
+		// them: it would then stay down after its first restart.
+		_ = s.ResetRecoveryActions()
+		defer func() {
+			if !recovered {
+				_ = setRecovery(s)
+			}
+		}()
+		// The running binary is locked: stop it before replacing it. One
+		// that will not stop (stuck in "stop pending") is ended: giving up
+		// here left the old version half stopped and every later install
+		// failing the same way until the next boot.
+		if err := stopOrKill(s); err != nil {
+			_ = setRecovery(s)
 			return err
 		}
 	}
 	if err := copyExec(self, p.Installed); err != nil {
+		if s != nil {
+			// The old version again, not a service left stopped until the
+			// next boot.
+			_ = setRecovery(s)
+			_ = s.Start()
+		}
 		return fmt.Errorf(i18n.T("autodpi.exe kurulum klasörüne kopyalanamadı: %w", "install binary: %w"), err)
 	}
+	// Whoever installs by hand has decided which version runs: an update
+	// still waiting to be confirmed must not take it back later. Only now
+	// that the new copy is in place: cleared before a copy that then failed,
+	// the old version was started again without its record and without the
+	// copy it could have gone back to. The service is down here, so nothing
+	// else is writing the record.
+	update.Forget(p)
 	if s == nil {
 		s, err = m.CreateService(paths.ServiceName, p.Installed, mgr.Config{
 			DisplayName:  "AutoDPI",
@@ -105,17 +137,35 @@ func Install(p paths.Set, self string) error {
 	if err := sysx.SecureExe(p.Installed); err != nil {
 		return fmt.Errorf(i18n.T("%s izinleri ayarlanamadı: %w", "set permissions on %s: %w"), p.Installed, err)
 	}
-	// KeepAlive + ThrottleInterval 10: restart 10 s after any exit that is
-	// not a clean stop, forever (the failure count resets after a day).
+	if err := setRecovery(s); err != nil {
+		return err
+	}
+	recovered = true
+	// Already running: something started it in between, which is what was wanted.
+	if err := s.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+		return fmt.Errorf(i18n.T("hizmet başlatılamadı: %w", "start service: %w"), err)
+	}
+	return nil
+}
+
+// EnsureLoginAgent is macOS's; on Windows the tray app's sign-in entry is
+// written by InstallTray and updates do not touch it.
+func EnsureLoginAgent(paths.Set) {}
+
+// RefreshJob is macOS's (the launchd property list); the service entry on
+// Windows holds nothing an update changes.
+func RefreshJob(paths.Set) {}
+
+// setRecovery is launchd's KeepAlive with ThrottleInterval 10: restart 10 s
+// after any exit that is not a clean stop, forever (the failure count resets
+// after a day).
+func setRecovery(s *mgr.Service) error {
 	restart := mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: 10 * time.Second}
 	if err := s.SetRecoveryActions([]mgr.RecoveryAction{restart, restart, restart}, 86400); err != nil {
 		return fmt.Errorf(i18n.T("kurtarma eylemleri ayarlanamadı: %w", "recovery actions: %w"), err)
 	}
 	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
 		return fmt.Errorf(i18n.T("çökme dışı hatalarda kurtarma ayarlanamadı: %w", "recovery on non-crash failures: %w"), err)
-	}
-	if err := s.Start(); err != nil {
-		return fmt.Errorf(i18n.T("hizmet başlatılamadı: %w", "start service: %w"), err)
 	}
 	return nil
 }
@@ -141,6 +191,26 @@ func prepareRoot(p paths.Set) error {
 		}
 	}
 	return nil
+}
+
+// stopOrKill stops the service and, when it does not stop in time, ends its
+// process and waits for the service manager to notice.
+func stopOrKill(s *mgr.Service) error {
+	err := stopAndWait(s, 30*time.Second)
+	if err == nil {
+		return nil
+	}
+	st, qerr := s.Query()
+	if qerr != nil || st.ProcessId == 0 {
+		return err
+	}
+	sysx.KillPID(st.ProcessId)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+		if st, qerr = s.Query(); qerr == nil && st.State == svc.Stopped {
+			return nil
+		}
+	}
+	return err
 }
 
 func stopAndWait(s *mgr.Service, timeout time.Duration) error {
@@ -176,18 +246,22 @@ func Uninstall(p paths.Set, purge bool) error {
 	}
 	defer m.Disconnect()
 	if s, err := m.OpenService(paths.ServiceName); err == nil {
-		stopErr := stopAndWait(s, 30*time.Second)
+		// One that will not stop is ended, and the removal carries on:
+		// returning here used to leave the service marked for deletion with
+		// everything else still installed, and every reinstall failing until
+		// the next boot.
+		_ = stopOrKill(s)
 		delErr := s.Delete()
 		s.Close()
 		if delErr != nil {
 			return fmt.Errorf(i18n.T("hizmet silinemedi: %w", "delete service: %w"), delErr)
 		}
-		if stopErr != nil {
-			return stopErr
-		}
 	}
 	_ = (&sysdns.Manager{File: p.DNSSaved}).Release()
 	_ = os.Remove(p.Sock)
+	// An update waiting to be confirmed ends here, with the copies it kept.
+	update.Forget(p)
+	removeFirewallRules(p)
 	uninstallTray(p)
 	sysx.KillOtherInstances() // hidden settings-page servers the menu started
 	if purge {
@@ -212,6 +286,21 @@ func Uninstall(p paths.Set, purge bool) error {
 		_ = os.Remove(dir) // the socket itself went above; only an empty ctl dir goes
 	}
 	return nil
+}
+
+// removeFirewallRules deletes the Windows Firewall rules that name our
+// sing-box. Its TUN code adds one for the program ("sing-tun (path)") and
+// never removes it; matched by program path, so nobody else's rule goes.
+func removeFirewallRules(p paths.Set) {
+	netsh := filepath.Join(os.Getenv("SystemRoot"), "System32", "netsh.exe")
+	if _, err := os.Stat(netsh); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, netsh, "advfirewall", "firewall", "delete", "rule", "name=all", "program="+filepath.Join(p.Bin, "sing-box.exe"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	_ = cmd.Run() // "no rules match" is an error too, and as good as done
 }
 
 // removeOrDefer deletes path; a running executable cannot be deleted on
@@ -313,6 +402,9 @@ func Run(ctx context.Context, inner func(context.Context) error) error {
 	return h.err
 }
 
+// stopWait is how long a stop waits for the daemon to wind down.
+var stopWait = 45 * time.Second
+
 type handler struct {
 	parent context.Context
 	body   func(context.Context) error
@@ -342,10 +434,17 @@ func (h *handler) Execute(_ []string, req <-chan svc.ChangeRequest, st chan<- sv
 				st <- c.CurrentStatus
 			case svc.Stop, svc.Shutdown:
 				// The daemon gives the network back first (sing-box down, DNS
-				// restored); that takes a few seconds.
-				st <- svc.Status{State: svc.StopPending, WaitHint: 30000}
+				// restored); that takes a few seconds. One that does not
+				// finish is not waited for: the service would sit in "stop
+				// pending" for good, where it can be neither started nor
+				// stopped nor replaced. Returning ends the process, and the
+				// helpers with it (their job object closes).
+				st <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWait/time.Millisecond) + 5000}
 				cancel()
-				h.err = <-done
+				select {
+				case h.err = <-done:
+				case <-time.After(stopWait):
+				}
 				return false, 0
 			}
 		}
@@ -370,6 +469,11 @@ func copyExec(src, dst string) error {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Sync(); err != nil { // before the rename: a power cut must not leave an empty program
 		out.Close()
 		os.Remove(tmp)
 		return err

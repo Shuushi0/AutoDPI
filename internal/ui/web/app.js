@@ -185,10 +185,10 @@ async function loadStatus() {
     $("updated").classList.remove("stale");
   } catch (e) {
     state.st = "";
-    setBadge("st-unreach", T("Servise ulaşılamıyor", "The service does not answer"),
-      T("Servis kapalı ya da yeniden başlıyor. Sayfa her 5 saniyede bir yeniden dener.", "The service is off or restarting. The page tries again every 5 seconds."), e.message);
+    const [title, lead] = unreachText(e);
+    setBadge("st-unreach", title, lead, e.kind === "gone" ? "" : e.message);
     $("toggle").disabled = true;
-    setCTA("retry");
+    setCTA(e.kind === "gone" ? "" : "retry");
     if (!$("s-engines").children.length) $("s-engines").append(el("li", "-"));
     $("hero").classList.add("unreach");
     $("updated").textContent = state.lastOk ? T("Son yanıt ", "Last answer ") + state.lastOk.toLocaleTimeString(LOC) : "";
@@ -569,7 +569,6 @@ function cfgBody() {
     retest_hours: parseInt($("retest_hours").value, 10) || 0,
     hedge_ms: parseInt($("hedge_ms").value, 10) || 0,
     language: $("language").value,
-    auto_update: $("auto_update").checked,
     update_check_hours: parseInt($("update_check_hours").value, 10) || 0,
   };
 }
@@ -610,14 +609,16 @@ async function loadConfig() {
     $("escalate_on_silence").checked = !!s.escalate_on_silence;
     $("local_domains").value = (s.local_domains || []).join(", ");
     $("language").value = s.language || "";
-    $("auto_update").checked = !!s.auto_update;
     setHoursOption(s.update_check_hours);
     state.language = s.language || "";
     state.cfg = s;
-    state.cfgSaved = JSON.stringify(cfgBody());
+    // An unreadable file: what the page shows is not what is on disk, so
+    // there is something to save even before anything is touched.
+    state.cfgSaved = c.broken ? "" : JSON.stringify(cfgBody());
     renderEngines();
     renderCfgSummary();
-    if (c.warning) msg(T("config.json uyarısı: ", "config.json warning: ") + c.warning, true);
+    if (c.broken) { msg(c.warning, true); markDirty(); }
+    else if (c.warning) msg(T("config.json uyarısı: ", "config.json warning: ") + c.warning, true);
   } catch (e) { msg(e.message, true); }
 }
 $("cfgreset").onclick = async () => { await loadConfig(); msg(T("Ayarlar dosyadaki haline döndürüldü.", "Settings reverted to the file.")); };
@@ -657,11 +658,19 @@ function updateLine(u) {
   const parts = [];
   const checked = parseTime(u.checked);
   parts.push(checked ? T("Son denetim ", "Last checked ") + fmtShort(u.checked) : T("Henüz denetlenmedi", "Not checked yet"));
+  // What failed is said by name, and a look that failed is no ground for
+  // "up to date": nothing was learned.
+  const failed = u.error ? u.error_kind || "check" : "";
   if (u.latest) parts.push(T(u.latest + " hazır", u.latest + " is out"));
-  else if (checked) parts.push(T(u.current + " güncel", u.current + " is up to date"));
-  if (u.error) parts.push(T("son deneme başarısız: ", "the last try failed: ") + u.error);
+  else if (checked && failed !== "check") parts.push(T(u.current + " güncel", u.current + " is up to date"));
+  if (u.latest && u.pending) parts.push(T("önceki güncelleme doğrulanıyor", "the last update is still being confirmed"));
+  if (failed === "check") parts.push(T("denetlenemedi: ", "the check failed: ") + u.error);
+  else if (failed === "download") parts.push(T("indirilemedi: ", "the download failed: ") + u.error);
+  else if (failed) parts.push(T("kurulamadı: ", "the install failed: ") + u.error);
   const l = u.last;
-  if (l && l.to) parts.push(l.ok ? T("son güncelleme " + l.from + " → " + l.to, "last update " + l.from + " → " + l.to) : T(l.to + " geri alındı", l.to + " was rolled back"));
+  if (l && l.to) parts.push(l.ok ? T("son güncelleme " + l.from + " → " + l.to, "last update " + l.from + " → " + l.to)
+    : u.current === l.to ? T(l.to + " geri alınamadı: " + (l.error || ""), l.to + " could not be rolled back: " + (l.error || ""))
+    : T(l.to + " geri alındı", l.to + " was rolled back"));
   return parts.join(" · ");
 }
 
@@ -680,7 +689,9 @@ function renderUpdate(u) {
     }));
   }
   $("updstate").textContent = updateLine(u);
-  put("s-update", !u ? "" : u.latest ? T(u.latest + " hazır", u.latest + " is out") : parseTime(u.checked) ? T("güncel", "up to date") : "");
+  put("s-update", !u ? "" : u.latest ? T(u.latest + " hazır", u.latest + " is out")
+    : u.error && (u.error_kind || "check") === "check" ? T("denetlenemedi", "check failed")
+    : parseTime(u.checked) ? T("güncel", "up to date") : "");
 }
 
 async function updateAct(a) {
@@ -688,7 +699,7 @@ async function updateAct(a) {
   if (a === "notes") { if (u.url) window.open(u.url, "_blank", "noopener"); return; }
   try {
     renderUpdate(await api("POST", "/api/update/" + a));
-    if (a === "install") msg(T("Güncelleme başladı; servis birazdan yeniden başlayacak.", "The update started; the service restarts shortly."));
+    if (a === "install") msg(T("Güncelleme başlatıldı.", "The update was started."));
   } catch (e) { msg(e.message, true); }
 }
 

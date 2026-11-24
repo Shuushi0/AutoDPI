@@ -106,8 +106,18 @@ func Start(s Spec) (*Proc, error) {
 		_ = cmd.Process.Kill()
 		select {
 		case <-p.done:
+			return
 		case <-time.After(grace):
-			<-p.done
+		}
+		// Not for ever: a process the kill did not end (a security program
+		// holding it, a handle that went stale) must not hold the daemon's
+		// shutdown, and with that the service in "stop pending". The job
+		// object ends it when the daemon exits.
+		_ = cmd.Process.Kill()
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+			s.Log.Warn("helper did not end after being killed; the job object ends it with the daemon", "proc", s.Name)
 		}
 	}
 	go func() {

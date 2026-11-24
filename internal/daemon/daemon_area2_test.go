@@ -111,6 +111,7 @@ func TestArea2Bug_FailureRunSurvivesOfflinePeriod(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		pass(t, d)
 	}
+	d.wentOffline = time.Now().Add(-10 * time.Minute)
 	f.set(func(f *fakeSys) { f.net.Online = true }) // back, and the first probe still fails
 	pass(t, d)
 	if !d.running() {

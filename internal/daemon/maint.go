@@ -35,6 +35,7 @@ func (d *Daemon) maint(r ipc.Request) (any, error) {
 		// started again (launchctl kickstart or sc start, the menu bar or tray
 		// app's start button, or the next boot).
 		d.note("shutdown", "", "requested")
+		d.quit.Store(true)
 		d.stopSoon()
 		return map[string]any{"stopping": true}, nil
 

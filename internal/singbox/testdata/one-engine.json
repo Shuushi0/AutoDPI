@@ -1,0 +1,193 @@
+{
+  "dns": {
+    "final": "doh",
+    "rules": [
+      {
+        "action": "route",
+        "domain_suffix": [
+          "local",
+          "localhost",
+          "lan",
+          "home.arpa",
+          "internal",
+          "test",
+          "invalid",
+          "example",
+          "localdomain",
+          "home",
+          "corp",
+          "intranet",
+          "private"
+        ],
+        "server": "local"
+      },
+      {
+        "action": "route",
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "server": "local"
+      },
+      {
+        "action": "evaluate",
+        "server": "doh"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NOERROR"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NXDOMAIN"
+      },
+      {
+        "action": "evaluate",
+        "server": "doh2",
+        "speculative": true
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NOERROR"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NXDOMAIN"
+      }
+    ],
+    "servers": [
+      {
+        "server": "1.1.1.1",
+        "tag": "doh",
+        "type": "https"
+      },
+      {
+        "server": "1.0.0.1",
+        "tag": "doh2",
+        "type": "https"
+      },
+      {
+        "server": "192.168.1.1",
+        "tag": "local",
+        "type": "udp"
+      }
+    ],
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "dns_mode": "hijack",
+      "stack": "mixed",
+      "strict_route": false,
+      "tag": "tun-in",
+      "type": "tun"
+    }
+  ],
+  "log": {
+    "level": "fatal",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21080,
+      "tag": "observer",
+      "type": "socks"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21082,
+      "tag": "ciadpi",
+      "type": "socks"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "doh",
+    "final": "direct",
+    "rule_set": [
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-ciadpi.json",
+        "tag": "blocked-ciadpi",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "action": "sniff",
+        "inbound": [
+          "tun-in"
+        ]
+      },
+      {
+        "action": "hijack-dns",
+        "port": [
+          53
+        ]
+      },
+      {
+        "network": [
+          "udp"
+        ],
+        "outbound": "direct",
+        "port": [
+          5353
+        ]
+      },
+      {
+        "outbound": "direct",
+        "process_name": [
+          "ciadpi",
+          "autodpi"
+        ]
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "action": "reject",
+        "network": [
+          "udp"
+        ],
+        "port": [
+          443
+        ],
+        "rule_set": [
+          "blocked-ciadpi"
+        ]
+      },
+      {
+        "outbound": "ciadpi",
+        "rule_set": [
+          "blocked-ciadpi"
+        ]
+      },
+      {
+        "network": [
+          "tcp"
+        ],
+        "outbound": "observer",
+        "port": [
+          443
+        ]
+      }
+    ]
+  }
+}

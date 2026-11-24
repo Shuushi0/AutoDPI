@@ -11,7 +11,8 @@ gösterir; **G** tuşu durdurur (hizmet olarak kuruluysa açılışta başlamas�
 ## Başlarken
 
 1. [Releases](https://github.com/Shuushi0/AutoDPI/releases) sayfasından `autodpi-windows-amd64-*.zip` dosyasını indir.
-2. Zip'e sağ tıkla → **Tümünü ayıkla**, örneğin masaüstüne çıkar. Zip'in içinden çalıştırma.
+2. Zip'e sağ tıkla → **Tümünü ayıkla**, örneğin masaüstüne çıkar. Zip'in içinden çalıştırma: o zaman
+   "Dosyalar eksik / Files are missing" yazısı çıkar; tamamını çıkarıp yeniden dene.
 3. Çıkan klasörde **`AutoDPI.cmd`** dosyasına çift tıkla, yönetici izni sorulunca **Evet** de.
    (`autodpi.exe`'ye çift tıklama: komut satırı programıdır, pencere açılıp hemen kapanır.)
 
@@ -23,9 +24,10 @@ Açılan menünün en üstünde servisin durumu yazar (KURULU DEĞİL / ÇALIŞI
 ## Adımlar (menü tuşları)
 
 1. **6 Ağ ölçümü**: hiçbir şeyi değiştirmez, hangi tekniğin bu ağda neyi açtığını ölçer. Birkaç dakika sürer.
-2. **7 Deneme çalıştırması**: kurmadan 5 dakika çalışır. Bu sırada tarayıcıda google.com, sonra açılmayan
-   sitelerini dene (engelli site ilk denemede ya da bir yenilemeden sonra açılmalı). Bitince internetin normal
-   çalıştığını kontrol et.
+2. **7 Deneme çalıştırması**: kurmadan 5 dakika çalışır ve kontrol panelini tarayıcıda kendisi açar
+   (durum, açılan ve listeye giren siteler orada görünür). Bu sırada tarayıcıda google.com, sonra açılmayan
+   sitelerini dene (engelli site ilk denemede ya da bir yenilemeden sonra açılmalı). Paneli kapattıysan menü
+   penceresinde 3'e basıp yeniden açabilirsin; erken bitirmek için aynı pencerede Q'ya bas. Bitince internetin normal çalıştığını kontrol et.
 3. **1 Kur**: açılışta başlayan bir Windows hizmeti olarak kurar. Engelli siteleri tekrar dene.
 4. **Tepsi simgesi**: kurulumdan sonra sağ altta (saatin yanında, gerekirse ^ okunun içinde) kalkan simgesi çıkar.
    Rengi durumu gösterir (yeşil = aktif). **Tıkla**: durum, liste ve son olaylar küçük bir pencerede açılır; dışarı
@@ -46,8 +48,9 @@ Açılan menünün en üstünde servisin durumu yazar (KURULU DEĞİL / ÇALIŞI
 
 ## Bir şey ters giderse
 
-- İnternet ya da DNS bozulursa menüde **0 Acil fren**. Düzelmezse bilgisayarı yeniden başlat.
-- Menü açılmazsa: Başlat'a sağ tıkla → **Terminal (Yönetici)**, klasöre girip
+- İnternet ya da DNS bozulursa menüde **0 Acil fren**. Düzelmezse **9 Kaldır**'ı kullan; yalnızca yeniden
+  başlatmak hizmeti yine açar.
+- Menü açılmazsa: Başlat'a sağ tıkla → **Terminal (Yönetici)** (Windows 10'da **Windows PowerShell (Yönetici)**), klasöre girip
   `powershell -ExecutionPolicy Bypass -File .\autodpi-menu.ps1` çalıştır ve görünen hatayı not et.
 - Her hatanın ekran görüntüsünü al; **8 Rapor topla** ile raporu hazırla.
 
@@ -57,5 +60,7 @@ Açılan menünün en üstünde servisin durumu yazar (KURULU DEĞİL / ÇALIŞI
 - İnternet sağlayıcısı (Türk Telekom, Turkcell Superonline, Vodafone…, ev/mobil).
 - Hangi sitelerin açılıp açılmadığı, deneme ve kaldırma sonrası internetin durumu, hata ekran görüntüleri.
 
-Raporda parola veya hesap bilgisi yok. Alan adları, ağ sağlayıcısının adı, yerel ağ adresleri, DNS kuralları,
-hosts kayıtları ve 53. portu kullanan programların adları olur; paylaşmadan önce içine bakın.
+Rapora parola yazılmaz. İçinde alan adları, ağ sağlayıcısının adı, yerel ağ adresleri, DNS kuralları, hosts
+kayıtları, ağ bağdaştırıcılarının adları, sistemin vekil (proxy) ayarı, 53. portu kullanan programların adları
+ve AutoDPI dosyalarıyla ilgili Defender tespitlerinin dosya yolları olur (yolda Windows kullanıcı adınız
+geçebilir, vekil ayarında adres bulunabilir); paylaşmadan önce içine bakın.

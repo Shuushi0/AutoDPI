@@ -2,4 +2,4 @@
 // daemon reports it, the tray and the updater compare against it.
 package version
 
-const Version = "0.1.1"
+const Version = "0.1.2"

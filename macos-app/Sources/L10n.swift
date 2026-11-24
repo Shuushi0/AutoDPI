@@ -5,7 +5,12 @@ import Foundation
 /// of the service's config.json, then the first of the user's preferred
 /// languages. Turkish when that is Turkish, English for every other.
 enum L10n {
-    static let turkish: Bool = {
+    static let turkish: Bool = detect()
+
+    /// The choice as it is now. The texts are fixed when the app starts
+    /// (`turkish`); when this stops agreeing with it, the language was
+    /// changed in the settings and the app starts again in the new one.
+    static func detect() -> Bool {
         if let v = norm(ProcessInfo.processInfo.environment["AUTODPI_LANG"]) { return v == "tr" }
         var cfg = "/Library/Application Support/AutoDPI/config.json"
         if let home = ProcessInfo.processInfo.environment["AUTODPI_HOME"], !home.isEmpty {
@@ -17,7 +22,7 @@ enum L10n {
             return v == "tr"
         }
         return norm(Locale.preferredLanguages.first) == "tr"
-    }()
+    }
 
     /// Dates and numbers follow the language.
     static let locale = Locale(identifier: turkish ? "tr_TR" : "en_GB")

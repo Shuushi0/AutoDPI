@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Shuushi0/AutoDPI/internal/config"
 	"github.com/Shuushi0/AutoDPI/internal/ipc"
 )
 
@@ -398,12 +399,162 @@ func TestSaveFileWindowsNeedsElevatedUI(t *testing.T) {
 	}
 }
 
-func TestRestartHintPerOS(t *testing.T) {
-	if h := restartHint("windows"); !strings.Contains(h, "Restart-Service AutoDPI") {
-		t.Errorf("windows: %q", h)
+// A save that changes what the service only reads at start restarts it by
+// itself; one that changes only what it reads afresh does not. Neither tells
+// the user to type a sudo command.
+func TestSaveRestartsTheServiceOnlyWhenNeeded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	var calls []string
+	s := New("tok", path, func(req ipc.Request, out any, _ time.Duration) error {
+		calls = append(calls, req.Cmd+" "+req.Action)
+		return nil
+	}, func(p string, b []byte) error { return os.WriteFile(p, b, 0o644) })
+	s.AllowPort("1")
+	post := func(body string) map[string]any {
+		t.Helper()
+		r := httptest.NewRequest("POST", "http://127.0.0.1:1/api/config?t=tok", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("save: %d %s", w.Code, w.Body)
+		}
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		if m, _ := out["message"].(string); strings.Contains(m, "sudo") || strings.Contains(m, "Restart-Service") {
+			t.Errorf("the save still asks for a command: %q", m)
+		}
+		return out
 	}
-	if h := restartHint("darwin"); !strings.Contains(h, "launchctl kickstart") {
-		t.Errorf("darwin: %q", h)
+	// "auto_update" is what a page left open since 0.1.1 still sends: it is
+	// taken, not refused, and changes nothing.
+	if out := post(`{"auto_update":false,"update_check_hours":12}`); out["restarted"] != false || len(calls) != 0 {
+		t.Fatalf("update settings alone restarted the service: %v %v", out, calls)
+	}
+	if out := post(`{"block_quic":false}`); out["restarted"] != true || len(calls) != 1 || calls[0] != "maint restart" {
+		t.Fatalf("a capture setting did not restart the service: %v %v", out, calls)
+	}
+}
+
+// A config.json that does not parse is what the service ignores; the page
+// must be able to save over it, keeping the old file.
+func TestSaveOverAnUnreadableConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"engines": ["tlsrec",`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := Settings{Engines: []string{"tlsrec", "ciadpi"}, SpoofSNI: "www.google.com", RetestHours: 6, HedgeMS: 1200}
+	b, err := MergeConfig(path, in)
+	if err != nil {
+		t.Fatalf("still refused: %v", err)
+	}
+	if _, err := config.Parse(b); err != nil {
+		t.Fatalf("what would be written does not parse: %v", err)
+	}
+	if left, _ := filepath.Glob(path + ".broken*"); len(left) != 0 {
+		t.Fatalf("a copy was written before anything was saved: %v", left)
+	}
+}
+
+// The page sends its whole form: an empty local-names box as [], where a
+// fresh install's file has no such key. That counted as a change, and every
+// save restarted the service, also one that changed nothing or only a
+// setting the service reads afresh.
+func TestSavingThePagesFullFormDoesNotRestartForNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	var calls []string
+	s := New("tok", path, func(req ipc.Request, out any, _ time.Duration) error {
+		calls = append(calls, req.Cmd+" "+req.Action)
+		return nil
+	}, func(p string, b []byte) error { return os.WriteFile(p, b, 0o644) })
+	s.AllowPort("1")
+	d := config.Default()
+	form := func(change func(m map[string]any)) string {
+		m := map[string]any{"engines": d.Engines, "spoof_sni": d.SpoofSNI + " ", "dns_takeover": d.DNSTakeover, "block_quic": d.BlockQUIC,
+			"escalate_on_silence": d.EscalateOnSilence, "local_domains": []string{}, "retest_hours": d.RetestHours, "hedge_ms": d.HedgeMS,
+			"language": "", "update_check_hours": d.UpdateCheckHours}
+		if change != nil {
+			change(m)
+		}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	post := func(body string) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "http://127.0.0.1:1/api/config?t=tok", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("save: %d %s", w.Code, w.Body)
+		}
+	}
+	post(form(nil)) // no config.json yet, nothing changed
+	post(form(nil)) // and again, now with a file
+	post(form(func(m map[string]any) {
+		m["language"], m["update_check_hours"] = "en", 12
+	}))
+	if len(calls) != 0 {
+		t.Fatalf("the service was restarted for nothing: %v", calls)
+	}
+	post(form(func(m map[string]any) {
+		m["language"], m["update_check_hours"], m["hedge_ms"] = "en", 12, d.HedgeMS+100
+	}))
+	if len(calls) != 1 || calls[0] != "maint restart" {
+		t.Fatalf("a real change did not restart the service: %v", calls)
+	}
+}
+
+// A file that parses and holds a value the service refuses, in a key the
+// page cannot edit: the service ignores the whole file, and so does the save.
+// It used to keep the key, and every save failed on it for good.
+func TestSaveOverAConfigTheServiceRefuses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	bad := `{"max_conn": 99999, "dns_takeover": false}`
+	if err := os.WriteFile(path, []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New("tok", path, func(ipc.Request, any, time.Duration) error { return nil },
+		func(p string, b []byte) error { return os.WriteFile(p, b, 0o644) })
+	s.AllowPort("1")
+	r := httptest.NewRequest("POST", "http://127.0.0.1:1/api/config?t=tok", strings.NewReader(`{"block_quic":true}`))
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("the save is still refused: %d %s", w.Code, w.Body)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("what was saved is not usable either: %v", err)
+	}
+	kept, _ := filepath.Glob(path + ".broken-*")
+	if len(kept) != 1 {
+		t.Fatalf("copies of the old file: %v", kept)
+	}
+	if b, _ := os.ReadFile(kept[0]); string(b) != bad {
+		t.Fatalf("the copy holds %q", b)
+	}
+	if !strings.Contains(w.Body.String(), filepath.Base(kept[0])) {
+		t.Errorf("the answer does not say where the old file is: %s", w.Body)
+	}
+}
+
+// A new local name that is a public suffix is refused by the page; one the
+// file already holds (written for an earlier version) stays the user's.
+func TestPageRefusesOnlyNewPublicSuffixes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"local_domains": ["office"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := Settings{Engines: []string{"tlsrec"}, SpoofSNI: "www.google.com", RetestHours: 6, HedgeMS: 1200}
+	in.Local = []string{"office", "corp"}
+	if _, err := MergeConfig(path, in); err != nil {
+		t.Fatalf("an entry the file already had was refused: %v", err)
+	}
+	in.Local = []string{"office", "com"}
+	if _, err := MergeConfig(path, in); err == nil {
+		t.Fatal("a new public suffix was accepted")
 	}
 }
 
@@ -423,5 +574,23 @@ func TestScriptsDoNotReadAConstBeforeItExists(t *testing.T) {
 				t.Errorf("%s:%d: %s reads itself: %s", name, i+1, m[1], line)
 			}
 		}
+	}
+}
+
+// A save takes the setting of an earlier version out of the file and keeps
+// what the page does not edit.
+func TestSaveDropsTheRetiredSetting(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(`{"auto_update": true, "ciadpi_args": "-s 1", "my_note": "kept"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := config.Default()
+	out, err := MergeConfig(p, Settings{Engines: d.Engines, SpoofSNI: d.SpoofSNI, DNSTakeover: d.DNSTakeover, BlockQUIC: d.BlockQUIC,
+		RetestHours: d.RetestHours, HedgeMS: d.HedgeMS, UpdateHours: d.UpdateCheckHours})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(out); strings.Contains(s, "auto_update") || !strings.Contains(s, `"my_note": "kept"`) || !strings.Contains(s, `"ciadpi_args": "-s 1"`) {
+		t.Fatalf("saved:\n%s", s)
 	}
 }

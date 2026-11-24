@@ -1,0 +1,287 @@
+{
+  "dns": {
+    "final": "doh",
+    "rules": [
+      {
+        "action": "route",
+        "domain_suffix": [
+          "local",
+          "localhost",
+          "lan",
+          "home.arpa",
+          "internal",
+          "test",
+          "invalid",
+          "example",
+          "localdomain",
+          "home",
+          "corp",
+          "intranet",
+          "private"
+        ],
+        "server": "local"
+      },
+      {
+        "action": "route",
+        "domain_regex": [
+          "^[^.]+$"
+        ],
+        "server": "local"
+      },
+      {
+        "action": "evaluate",
+        "server": "doh"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NOERROR"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NXDOMAIN"
+      },
+      {
+        "action": "evaluate",
+        "server": "doh2",
+        "speculative": true
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NOERROR"
+      },
+      {
+        "action": "respond",
+        "match_response": true,
+        "race": true,
+        "response_rcode": "NXDOMAIN"
+      }
+    ],
+    "servers": [
+      {
+        "server": "1.1.1.1",
+        "tag": "doh",
+        "type": "https"
+      },
+      {
+        "server": "1.0.0.1",
+        "tag": "doh2",
+        "type": "https"
+      },
+      {
+        "server": "192.168.1.1",
+        "tag": "local",
+        "type": "udp"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "dns_mode": "hijack",
+      "stack": "mixed",
+      "strict_route": false,
+      "tag": "tun-in",
+      "type": "tun"
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 21081,
+      "tag": "tlsrec-in",
+      "type": "socks"
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 21083,
+      "tag": "tlsspoof-in",
+      "type": "socks"
+    }
+  ],
+  "log": {
+    "level": "fatal",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21080,
+      "tag": "observer",
+      "type": "socks"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21082,
+      "tag": "ciadpi",
+      "type": "socks"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "doh",
+    "final": "direct",
+    "rule_set": [
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-tlsrec.json",
+        "tag": "blocked-tlsrec",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-ciadpi.json",
+        "tag": "blocked-ciadpi",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-tlsspoof.json",
+        "tag": "blocked-tlsspoof",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "action": "reject",
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "ip_is_private": true
+      },
+      {
+        "action": "route-options",
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "tls_record_fragment": true
+      },
+      {
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "reject",
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "ip_is_private": true
+      },
+      {
+        "action": "route-options",
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "tls_spoof": "www.google.com",
+        "tls_spoof_method": "wrong-sequence"
+      },
+      {
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "sniff",
+        "inbound": [
+          "tun-in"
+        ]
+      },
+      {
+        "action": "hijack-dns",
+        "port": [
+          53
+        ]
+      },
+      {
+        "network": [
+          "udp"
+        ],
+        "outbound": "direct",
+        "port": [
+          5353
+        ]
+      },
+      {
+        "outbound": "direct",
+        "process_name": [
+          "ciadpi",
+          "autodpi"
+        ]
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "action": "reject",
+        "network": [
+          "udp"
+        ],
+        "port": [
+          443
+        ],
+        "rule_set": [
+          "blocked-tlsrec",
+          "blocked-ciadpi",
+          "blocked-tlsspoof"
+        ]
+      },
+      {
+        "action": "route-options",
+        "rule_set": [
+          "blocked-tlsrec"
+        ],
+        "tls_record_fragment": true
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "blocked-tlsrec"
+        ]
+      },
+      {
+        "outbound": "ciadpi",
+        "rule_set": [
+          "blocked-ciadpi"
+        ]
+      },
+      {
+        "action": "route-options",
+        "rule_set": [
+          "blocked-tlsspoof"
+        ],
+        "tls_spoof": "www.google.com",
+        "tls_spoof_method": "wrong-sequence"
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "blocked-tlsspoof"
+        ]
+      },
+      {
+        "network": [
+          "tcp"
+        ],
+        "outbound": "observer",
+        "port": [
+          443
+        ]
+      }
+    ]
+  }
+}

@@ -86,6 +86,9 @@ func singBoxCheck(t *testing.T, cfg []byte) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(out.String()))
 	}
+	if said := strings.TrimSpace(out.String()); said != "" {
+		return fmt.Errorf("accepted, but sing-box had something to say about it: %s", said)
+	}
 	return nil
 }
 

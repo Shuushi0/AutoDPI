@@ -141,11 +141,16 @@ func renameRetry(from, to string) error {
 // selfProcs are the process names whose traffic sing-box must never capture.
 // Windows reports image names with their extension.
 func selfProcs() []string {
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return []string{"ciadpi.exe", "autodpi.exe"}
 	}
 	return []string{"ciadpi", "autodpi"}
 }
+
+// goos is the system the configuration is written for. A variable so that
+// the tests can pin the Windows configuration on the machine that builds the
+// release, which is not a Windows one.
+var goos = runtime.GOOS
 
 type obj = map[string]any
 
@@ -269,6 +274,13 @@ func Build(o Options) ([]byte, error) {
 			// resolver here (sysdns), since macOS service order decides.
 			"dns_mode":     "hijack",
 			"strict_route": o.StrictRoute,
+			// Named on purpose. Unset means "mixed" in sing-box 1.14 and a
+			// brand-new TCP/IP stack in 1.15: with it named, a sing-box that
+			// wants to change it says so, and the tests fail on anything
+			// sing-box says about an accepted configuration. What carries
+			// every user's traffic changes after a TUN run as root, not by a
+			// version bump.
+			"stack": "mixed",
 		})
 	} else {
 		inbounds = append(inbounds, obj{

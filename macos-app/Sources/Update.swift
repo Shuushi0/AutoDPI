@@ -12,14 +12,20 @@ struct UpdateInfo: Decodable, Equatable {
     var latest: String
     var url: String
     var phase: String
-    var auto: Bool
     var skipped: Bool
     var failed: Bool
     var supported: Bool
     var error: String
+    var errorKind: String
+    var pending: Bool
+    var rolledBack: Bool
     var checked: Date?
 
-    enum CodingKeys: String, CodingKey { case current, latest, url, phase, auto, skipped, failed, supported, error, checked }
+    enum CodingKeys: String, CodingKey {
+        case current, latest, url, phase, skipped, failed, supported, error, checked, pending
+        case errorKind = "error_kind"
+        case rolledBack = "rolled_back"
+    }
 
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -27,11 +33,13 @@ struct UpdateInfo: Decodable, Equatable {
         latest = (try? c.decode(String.self, forKey: .latest)) ?? ""
         url = (try? c.decode(String.self, forKey: .url)) ?? ""
         phase = (try? c.decode(String.self, forKey: .phase)) ?? ""
-        auto = (try? c.decode(Bool.self, forKey: .auto)) ?? false
         skipped = (try? c.decode(Bool.self, forKey: .skipped)) ?? false
         failed = (try? c.decode(Bool.self, forKey: .failed)) ?? false
         supported = (try? c.decode(Bool.self, forKey: .supported)) ?? false
         error = (try? c.decode(String.self, forKey: .error)) ?? ""
+        errorKind = (try? c.decode(String.self, forKey: .errorKind)) ?? ""
+        pending = (try? c.decode(Bool.self, forKey: .pending)) ?? false
+        rolledBack = (try? c.decode(Bool.self, forKey: .rolledBack)) ?? false
         // Go's zero time ("0001-01-01T00:00:00Z") means never.
         checked = (try? c.decode(Date.self, forKey: .checked)).flatMap { $0.timeIntervalSince1970 > 0 ? $0 : nil }
     }
@@ -52,27 +60,29 @@ extension UpdateInfo {
         guard !latest.isEmpty else { return nil }
         let v = latest
         let title = loc("Sürüm \(v) hazır", "Version \(v) is out")
+        // An error from looking for releases is not this version's (common.js).
+        let instErr = errorKind == "check" ? "" : error
         if phase == "installing" {
             return UpdateNotice(title: loc("\(v) kuruluyor", "Installing \(v)"),
-                                text: loc("Servis yeniden başlıyor; bağlantılar birkaç saniye kesilebilir.", "The service is restarting; connections may drop for a few seconds."), acts: [])
+                                text: loc("Yeni sürüm bu bilgisayarda denetleniyor, ardından kurulacak; servis birkaç saniyeliğine yeniden başlayabilir.", "The new version is being checked on this computer, then installed; the service may restart for a few seconds."), acts: [])
         }
         if skipped { return nil }
-        if failed {
-            return UpdateNotice(title: loc("\(v) kurulamadı", "\(v) did not install"),
-                                text: loc("Yeni sürüm düzgün çalışmadı, önceki sürüme dönüldü.", "The new version did not run properly; the previous one is back."), acts: [.install, .notes, .skip])
-        }
         if phase == "downloading" { return UpdateNotice(title: title, text: loc("İndiriliyor…", "Downloading…"), acts: [.notes]) }
+        if failed {
+            // Taken back after it was installed, or never installed at all:
+            // the service says which (the same decisions as common.js).
+            let text = rolledBack
+                ? loc("Yeni sürüm düzgün çalışmadı, önceki sürüme dönüldü.", "The new version did not run properly; the previous one is back.")
+                : loc("Bu bilgisayarda kurulamadı; kurulu sürüm çalışmaya devam ediyor.", "It could not be installed on this computer; the installed version keeps running.") + (instErr.isEmpty ? "" : " " + instErr)
+            // The button tries the same version once more; "Update" here
+            // read as if nothing had been tried.
+            return UpdateNotice(title: loc("\(v) kurulamadı", "\(v) did not install"), text: text, acts: [.install, .notes, .skip], installLabel: loc("Yeniden dene", "Try again"))
+        }
         if !supported {
             return UpdateNotice(title: title, text: loc("Bu kurulum kendini güncelleyemiyor; yeni sürümü elle kurun.", "This install cannot update itself; install the new version by hand."), acts: [.notes])
         }
-        if auto {
-            let text = phase == "ready"
-                ? loc("İndirildi; bağlantı boşta kalınca kendiliğinden kurulacak.", "Downloaded; it installs by itself once the connection is idle.")
-                : loc("Uygun bir anda kendiliğinden kurulacak.", "It installs by itself at a quiet moment.")
-            return UpdateNotice(title: title, text: text, acts: [.install, .notes], installLabel: loc("Şimdi kur", "Install now"))
-        }
         return UpdateNotice(title: title,
-                            text: error.isEmpty ? loc("Kurmak için Güncelle'ye basın; servis birkaç saniyeliğine yeniden başlar.", "Press Update to install it; the service restarts for a few seconds.") : error,
+                            text: instErr.isEmpty ? loc("Kurmak için Güncelle'ye basın; servis birkaç saniyeliğine yeniden başlar.", "Press Update to install it; the service restarts for a few seconds.") : instErr,
                             acts: [.install, .notes, .skip])
     }
 }
@@ -92,6 +102,12 @@ enum UpdateFollower {
             relaunch()
             return
         }
+        // The language was changed in the settings: the texts are fixed at
+        // start, so the app starts again in the new one.
+        if L10n.detect() != L10n.turkish {
+            relaunch()
+            return
+        }
         let d = UserDefaults.standard
         let seen = d.string(forKey: seenKey) ?? ""
         if !st.version.isEmpty, st.version != seen {
@@ -100,9 +116,12 @@ enum UpdateFollower {
             }
             d.set(st.version, forKey: seenKey)
         }
-        if let u = st.update, !u.latest.isEmpty, !u.skipped, u.latest != d.string(forKey: announcedKey),
-           !u.auto || !u.supported || u.failed {
-            notify(loc("AutoDPI \(u.latest) hazır", "AutoDPI \(u.latest) is out"), loc("Kurmak için menü çubuğundaki AutoDPI'yi açın.", "Open AutoDPI in the menu bar to install it."))
+        if let u = st.update, !u.latest.isEmpty, !u.skipped, u.latest != d.string(forKey: announcedKey) {
+            if u.failed {
+                notify(loc("AutoDPI \(u.latest) kurulamadı", "AutoDPI \(u.latest) did not install"), loc("Kurulu sürüm çalışmaya devam ediyor. Ayrıntı menü çubuğundaki AutoDPI'de.", "The installed version keeps running. The details are in AutoDPI in the menu bar."))
+            } else {
+                notify(loc("AutoDPI \(u.latest) hazır", "AutoDPI \(u.latest) is out"), loc("Kurmak için menü çubuğundaki AutoDPI'yi açın.", "Open AutoDPI in the menu bar to install it."))
+            }
             d.set(u.latest, forKey: announcedKey)
         }
     }
@@ -119,7 +138,11 @@ enum UpdateFollower {
         relaunching = true
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", Bundle.main.bundlePath]
+        // Only once this copy is gone: a new one that finds it still closing
+        // exits at once (main.swift), and a fixed one-second wait lost that
+        // race on a busy machine, leaving no menu bar item at all.
+        p.arguments = ["-c", "i=0; while kill -0 \"$1\" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; /usr/bin/open -n \"$0\"",
+                       Bundle.main.bundlePath, String(ProcessInfo.processInfo.processIdentifier)]
         do { try p.run() } catch { relaunching = false; return }
         NSApp.terminate(nil)
     }

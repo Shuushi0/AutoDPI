@@ -370,11 +370,11 @@ body.page {
 .updnote[hidden] { display: none; }
 .updnote-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .updnote-t b { font-size: 14px; font-weight: 650; }
-.updnote-t span { font-size: 12.5px; color: var(--muted); }
+.updnote-t span { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .updnote-a { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .updfield { padding-top: 12px; border-top: 1px solid var(--hair); display: flex; flex-direction: column; }
 .updcheckrow { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.updstate { margin: 0; }
+.updstate { margin: 0; overflow-wrap: anywhere; }
 .updresult { margin: 0; font-size: 13px; font-weight: 600; }
 .updresult.err { color: var(--c-orange); overflow-wrap: anywhere; }
 @media (max-width: 640px) { .updnote { flex-wrap: wrap; } .updnote-a { width: 100%; justify-content: flex-start; } }

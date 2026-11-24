@@ -226,6 +226,7 @@ struct HeaderView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
+                        .help(d) // the whole text: two lines cut a long reason short
                 }
             }
             Spacer(minLength: 8)

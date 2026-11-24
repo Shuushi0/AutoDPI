@@ -18,6 +18,9 @@ func IsRoot() bool { return os.Geteuid() == 0 }
 // the installer and created 0755 by the daemon, which runs as root.
 func SecureDir(string) error { return nil }
 
+// SecureExe is for Windows: the mode bits do this here.
+func SecureExe(string) error { return nil }
+
 // ShareConfig is a no-op on macOS: config.json is written 0644 (readable by
 // everyone, changed by root only).
 func ShareConfig(string) error { return nil }

@@ -1,9 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 — 2026-11-24
 
-- `sudo autodpi install` on macOS now also puts `AutoDPI.app` from the same folder into `/Applications` and
-  opens it. There is no separate copy step any more.
+**AutoDPI is smaller**
+
+The part of AutoDPI that captures your traffic is sing-box. Until now it came with everything sing-box
+can do; from this version on it carries only what AutoDPI uses.
+
+- AutoDPI takes about 18 MB less space on your disk, and its updates are that much smaller to download.
+- Nothing changes in how your connections are handled: it is the same sing-box version, with the same
+  settings.
+- The libraries inside it were brought up to date.
+- Before a new version takes the place of the one you have, it checks on your own computer that it
+  works there. If it does not, the version you have stays.
+- Going through sing-box's parts one by one and deciding what could go was done with the help of an AI
+  assistant.
+
+**Updates**
+
+- Updates are no longer installed by themselves. When a new version is out, AutoDPI tells you in the
+  menu bar app, the tray window and the settings page, and installs it when you press Update. (This
+  version itself still arrives the old way if you had left automatic updates on.)
+- An update that does not work on your computer undoes itself: the version you had comes back.
+- An update survives a power cut, a crash, or an antivirus holding one of its files. You are not left
+  without a program.
+- The update line says what failed (the check, the download or the install) and why.
+- macOS: `sudo autodpi install` now also puts AutoDPI.app into Applications and opens it.
+
+**Windows**
+
+- The trial run (7 in the menu) now opens the control panel by itself, so you can watch what it does
+  while you try your sites. Press 3 in the menu window to open the panel again, Q to end the trial
+  early.
 
 ## 0.1.1 — 2026-11-06
 

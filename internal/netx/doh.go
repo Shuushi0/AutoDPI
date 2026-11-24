@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -32,8 +33,25 @@ type DoH struct {
 	Bases   []string      // https://1.1.1.1, https://1.0.0.1
 	Attempt time.Duration // per-server limit, default 4s
 
-	mu   sync.Mutex
-	last int // index into Bases of the server that answered last
+	mu    sync.Mutex
+	last  int                   // index into Bases of the server that answered last
+	conns map[*dohConn]struct{} // every connection the transport has open
+}
+
+// dohConn is a connection of the DoH transport that Reset can close.
+type dohConn struct {
+	net.Conn
+	d    *DoH
+	once sync.Once
+}
+
+func (c *dohConn) Close() error {
+	c.once.Do(func() {
+		c.d.mu.Lock()
+		delete(c.d.conns, c)
+		c.d.mu.Unlock()
+	})
+	return c.Conn.Close()
 }
 
 // NewDoH returns a client over the default servers.
@@ -42,8 +60,19 @@ func NewDoH(d *Dialer) *DoH { return NewDoHServers(d, DefaultDoHServers) }
 // NewDoHServers returns a client over the given resolver hosts or IPs
 // (blanks and duplicates dropped; none given means the defaults).
 func NewDoHServers(d *Dialer, servers []string) *DoH {
+	doh := &DoH{conns: map[*dohConn]struct{}{}}
 	tr := &http.Transport{
-		DialContext:           d.DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			tc := &dohConn{Conn: c, d: doh}
+			doh.mu.Lock()
+			doh.conns[tc] = struct{}{}
+			doh.mu.Unlock()
+			return tc, nil
+		},
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 5 * time.Second,
@@ -51,12 +80,51 @@ func NewDoHServers(d *Dialer, servers []string) *DoH {
 		// Longer than the daemon's 30s health period, so a check reuses the
 		// HTTP/2 connection instead of a new TLS handshake each time.
 		IdleConnTimeout: 90 * time.Second,
+		// A connection whose far end went away without a word (the link
+		// dropped, the machine slept, a NAT forgot it) looks alive until
+		// something is written to it, and HTTP/2 then waits on it instead of
+		// opening a new one: every query failed for as long as the daemon
+		// kept asking (measured: over 30 s). A ping after a while without a
+		// frame, and 3 s for its reply, ends such a connection; and a lookup
+		// that failed on every server closes the connections at once (each,
+		// Reset). Not a short interval: the health check keeps the
+		// connection in use, so a 5 s ping went out every few seconds for as
+		// long as the service ran, and a phone sharing its line never got to
+		// put its radio to sleep.
+		HTTP2: &http.HTTP2Config{SendPingTimeout: 45 * time.Second, PingTimeout: 3 * time.Second},
 	}
 	var bases []string
 	for _, s := range CleanServers(servers) {
 		bases = append(bases, "https://"+HostForURL(s))
 	}
-	return &DoH{Client: &http.Client{Transport: tr}, Bases: bases}
+	doh.Client = &http.Client{Transport: tr}
+	doh.Bases = bases
+	return doh
+}
+
+// Reset closes the connections, so the next query opens a new one. For the
+// moment the network comes back, and for a lookup that failed on every
+// server: what was open is dead, and nothing has said so yet.
+//
+// Closing only the idle ones is not enough. HTTP/2 counts a connection as in
+// use until the query that just timed out has let go of it, which is a
+// moment after that query returned, and with lookups coming one after another
+// it is never idle at all: the dead connection was kept and every lookup
+// failed until the ping gave up on it (measured: 8 lookups in a row, 32 s).
+func (d *DoH) Reset() {
+	if d == nil || d.Client == nil {
+		return
+	}
+	d.mu.Lock()
+	open := make([]*dohConn, 0, len(d.conns))
+	for c := range d.conns {
+		open = append(open, c)
+	}
+	d.mu.Unlock()
+	for _, c := range open {
+		_ = c.Close()
+	}
+	d.Client.CloseIdleConnections()
 }
 
 // HostForURL brackets an IPv6 literal for use as the host of a URL.
@@ -134,6 +202,13 @@ func (d *DoH) each(ctx context.Context, fn func(ctx context.Context, base string
 		if ctx.Err() != nil { // the caller gave up; trying more is pointless
 			break
 		}
+	}
+	// Every server failed: if that was a connection gone dead without a
+	// word, the next lookup must not be handed the same one. Not when it was
+	// the caller that gave up: that says nothing about the connections, and
+	// other lookups may be using them.
+	if ctx.Err() == nil {
+		d.Reset()
 	}
 	return errors.Join(errs...)
 }

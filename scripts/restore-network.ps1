@@ -14,10 +14,20 @@ $support = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Au
 $script:TR = (Get-UICulture).TwoLetterISOLanguageName -eq 'tr'
 $installed = Join-Path $support 'autodpi.exe'
 if (Test-Path $installed) {
-    $lang = & $installed lang 2>$null
+    # In a try: an autodpi.exe that may not run (blocked by a security
+    # program or policy) throws here, and when this script is called from the
+    # menu that ended the whole brake before it had stopped anything.
+    try { $lang = & $installed lang 2>$null } catch { $lang = $null }
     if ($lang) { $script:TR = "$lang".Trim() -eq 'tr' }
 }
 function T([string]$trText, [string]$enText) { if ($script:TR) { $trText } else { $enText } }
+
+# Without administrator rights every command below fails without a word, and
+# the lines at the end would still say that it is done.
+if (-not [bool](& "$env:SystemRoot\System32\whoami.exe" /groups | Select-String -SimpleMatch 'S-1-16-12288')) {
+    Write-Host (T 'Acil fren yönetici PowerShell ister: Başlat''a sağ tık > Terminal (Yönetici), sonra yeniden çalıştırın. Hiçbir şey değiştirilmedi.' 'The emergency brake needs an administrator PowerShell: right-click Start > Terminal (Admin), then run it again. Nothing was changed.') -ForegroundColor Red
+    exit 1
+}
 
 # Service recovery restarts the service 10 s after any exit that is not a clean
 # stop, so force-killing it below would just bring the capture back. Turn the
@@ -27,7 +37,15 @@ function T([string]$trText, [string]$enText) { if ($script:TR) { $trText } else 
 cmd.exe /c 'sc.exe failure AutoDPI reset= 0 actions= ""' | Out-Null
 sc.exe failureflag AutoDPI 0 | Out-Null
 
-Stop-Service -Name AutoDPI -Force -ErrorAction SilentlyContinue
+# -NoWait: without it Stop-Service waits for as long as the service stays in
+# "stop pending", which for a stuck one is for ever, and nothing below would
+# run. Ten seconds for an orderly stop, then the process is ended.
+Stop-Service -Name AutoDPI -Force -NoWait -ErrorAction SilentlyContinue
+for ($i = 0; $i -lt 20; $i++) {
+    $svc = Get-Service -Name AutoDPI -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -eq 'Stopped') { break }
+    Start-Sleep -Milliseconds 500
+}
 # Still alive (stuck in STOP_PENDING)? End the service process itself.
 $q = sc.exe queryex AutoDPI | Select-String 'PID\s*:\s*(\d+)'
 if ($q) {

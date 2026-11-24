@@ -258,21 +258,58 @@ func (h *hub) start(s Spec) (*Proc, error) {
 			p.err = errors.New("exited at once")
 		}
 		return nil, p.err
-	case <-time.After(15 * time.Second):
+	case <-time.After(startWait):
+		// The guard may still get to it (a first run of a new binary that the
+		// system scans for a long time): the stop is queued behind the start,
+		// so a copy nobody knows about does not run on next to the caller's
+		// next try.
+		_ = h.send(request{Op: "stop", ID: id})
 		h.finish(id, errors.New("guard did not answer"))
+		// A guard that says nothing for this long is taken to be wedged. It
+		// goes, with whatever it still runs: left in place because another
+		// helper lives under it, it was handed every later start as well, and
+		// each of them failed the same way until that helper was stopped.
+		// The helpers' keepers start them again under a new guard.
+		s.Log.Warn("guard does not answer, killing it and its children", "proc", s.Name)
+		h.mu.Lock()
+		h.closing = true
+		h.mu.Unlock()
+		_ = syscall.Kill(-h.pid, syscall.SIGKILL)
+		_ = syscall.Kill(h.pid, syscall.SIGKILL)
 		return nil, errors.New("guard did not answer")
 	}
 	p.stop = func(grace time.Duration) {
 		_ = h.send(request{Op: "stop", ID: id, GraceMS: int(grace / time.Millisecond)})
 		select {
 		case <-p.done:
+			return
 		case <-time.After(grace + 2*time.Second):
 			_ = syscall.Kill(p.pid, syscall.SIGKILL) // the guard did not manage: do it ourselves
-			<-p.done
+		}
+		// Only the guard reports the exit. One that is wedged (stopped, or
+		// stuck writing) never will, and a shutdown waiting here would hold
+		// the network: the guard and everything it runs go instead, which
+		// ends its pipe and with that reports every child (hub.read). The
+		// other helpers are started again under a new guard by their keepers.
+		select {
+		case <-p.done:
+			return
+		case <-time.After(2 * time.Second):
+			s.Log.Warn("guard does not answer, killing it and its children", "proc", s.Name)
+			_ = syscall.Kill(-h.pid, syscall.SIGKILL)
+			_ = syscall.Kill(h.pid, syscall.SIGKILL)
+		}
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second): // never block a shutdown for good
 		}
 	}
 	return p, nil
 }
+
+// startWait is how long the guard gets to report a child as started. A
+// variable so that tests need not wait.
+var startWait = 15 * time.Second
 
 // ---- guard side ------------------------------------------------------------
 
@@ -322,6 +359,11 @@ func RunGuard(argv []string) int {
 	if parent != 0 && os.Getppid() != parent {
 		return 0 // the daemon is already gone: start nothing
 	}
+	// The daemon's death closes the pipe this process writes its events to. A
+	// Go program dies of SIGPIPE on its standard output unless it asked for the
+	// signal, and that would be before the children are stopped: sing-box
+	// would run on with the TUN and nobody to end it.
+	signal.Ignore(syscall.SIGPIPE)
 
 	var (
 		outMu    sync.Mutex

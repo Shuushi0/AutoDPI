@@ -57,6 +57,9 @@ func check(t *testing.T, cfg []byte) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("sing-box check failed: %v\n%s\n%s", err, out.String(), cfg)
 	}
+	if strings.TrimSpace(out.String()) != "" {
+		t.Fatalf("sing-box accepted the configuration but had something to say about it:\n%s", out.String())
+	}
 }
 
 func TestTunConfigValidates(t *testing.T) {

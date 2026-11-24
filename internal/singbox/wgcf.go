@@ -2,8 +2,10 @@ package singbox
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -56,6 +58,31 @@ func ParseWgcf(r io.Reader) (*WireGuardProfile, error) {
 	}
 	if p.PrivateKey == "" || p.PublicKey == "" || len(p.Addresses) == 0 || p.Endpoint == "" {
 		return nil, fmt.Errorf("wgcf: profile is missing PrivateKey, Address, PublicKey or Endpoint")
+	}
+	// What sing-box would refuse is refused here: there the whole
+	// configuration fails with it, and no engine runs at all.
+	for name, key := range map[string]string{"PrivateKey": p.PrivateKey, "PublicKey": p.PublicKey} {
+		if b, err := base64.StdEncoding.DecodeString(key); err != nil || len(b) != 32 {
+			return nil, fmt.Errorf("wgcf: %s is not a WireGuard key (32 bytes in base64)", name)
+		}
+	}
+	for i, a := range p.Addresses {
+		if _, err := netip.ParsePrefix(a); err != nil {
+			ip, err := netip.ParseAddr(a)
+			if err != nil {
+				return nil, fmt.Errorf("wgcf: bad Address %q", a)
+			}
+			// WireGuard reads a bare address as a single host; sing-box
+			// wants the prefix written out and refuses the whole
+			// configuration, every engine with it, without one.
+			p.Addresses[i] = netip.PrefixFrom(ip, ip.BitLen()).String()
+		}
+	}
+	if p.MTU < 576 || p.MTU > 9000 {
+		return nil, fmt.Errorf("wgcf: bad MTU %d", p.MTU)
+	}
+	if strings.ContainsAny(p.Endpoint, " \t/\"") {
+		return nil, fmt.Errorf("wgcf: bad endpoint host %q", p.Endpoint)
 	}
 	return p, nil
 }

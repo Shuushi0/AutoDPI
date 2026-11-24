@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/Shuushi0/AutoDPI/internal/i18n"
@@ -56,6 +55,9 @@ type Response struct {
 	OK    bool            `json:"ok"`
 	Error string          `json:"error,omitempty"`
 	Data  json.RawMessage `json:"data,omitempty"`
+	// Kind is set when the service did not take the request at all (KindBusy:
+	// every control slot is in use), as opposed to refusing what it asked.
+	Kind string `json:"kind,omitempty"`
 }
 
 type Handler func(ctx context.Context, req Request) (any, error)
@@ -93,7 +95,23 @@ func Serve(ctx context.Context, path string, h Handler) error {
 		ln.Close()
 		return fmt.Errorf("control socket %s: %w", path, err)
 	}
-	go func() { <-ctx.Done(); ln.Close(); os.Remove(path) }()
+	// On the way out the socket file goes, but only while it is still this
+	// listener's: a daemon started right after this one stopped listening has
+	// its own socket at the same path by then, and removing that would leave
+	// it running with nothing to reach it by.
+	mine, _ := os.Stat(path)
+	if ul, ok := ln.(*net.UnixListener); ok && mine != nil {
+		ul.SetUnlinkOnClose(false) // Close would unlink the path whoever owns it
+	}
+	defer func() { // before Serve returns: its caller may look for the file next
+		ln.Close()
+		if mine == nil {
+			os.Remove(path) // the file cannot be told apart here: as before
+		} else if cur, err := os.Stat(path); err == nil && os.SameFile(mine, cur) {
+			os.Remove(path)
+		}
+	}()
+	go func() { <-ctx.Done(); ln.Close() }()
 
 	var delay time.Duration
 	slots := make(chan struct{}, MaxConns)
@@ -135,7 +153,7 @@ func Serve(ctx context.Context, path string, h Handler) error {
 			case slots <- struct{}{}:
 				wait.Stop()
 			case <-wait.C:
-				go refuse(c, "the service is busy (too many control connections); try again")
+				go refuse(c, "the service is busy (too many control connections); try again", KindBusy)
 				continue
 			case <-ctx.Done():
 				wait.Stop()
@@ -167,10 +185,10 @@ func (r *idleReader) Read(p []byte) (int, error) {
 }
 
 // refuse answers a connection with an error and closes it.
-func refuse(c net.Conn, msg string) {
+func refuse(c net.Conn, msg, kind string) {
 	defer c.Close()
 	_ = c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_ = json.NewEncoder(c).Encode(Response{Error: msg})
+	_ = json.NewEncoder(c).Encode(Response{Error: msg, Kind: kind})
 }
 
 func serveConn(ctx context.Context, c net.Conn, h Handler) {
@@ -182,7 +200,7 @@ func serveConn(ctx context.Context, c net.Conn, h Handler) {
 	in := &io.LimitedReader{R: &idleReader{c: c, idle: 5 * time.Second, end: time.Now().Add(time.Minute)}, N: MaxRequest + 1}
 	if err := json.NewDecoder(bufio.NewReader(in)).Decode(&req); err != nil {
 		if in.N <= 0 {
-			refuse(c, fmt.Sprintf("invalid request: larger than %d bytes", MaxRequest))
+			refuse(c, fmt.Sprintf("invalid request: larger than %d bytes", MaxRequest), "")
 			return
 		}
 		// A client that sent something that is not a request gets told so; one
@@ -223,31 +241,79 @@ func safely(ctx context.Context, h Handler, req Request) (data any, err error) {
 
 // Call sends req to the daemon at path and decodes the response data into out.
 // It asks for answers in this process's language unless req.Lang says.
+// Why a call did not get an answer from the service. An answer that is an
+// error (a refused request) is a plain error, not one of these.
+const (
+	KindDown   = "down"   // nothing runs behind the socket
+	KindDenied = "denied" // it runs, and this user may not talk to it
+	KindBusy   = "busy"   // it runs and did not answer (in time)
+)
+
+// CallError is Call's error when the service gave no answer; Msg is in the
+// user's language.
+type CallError struct{ Kind, Msg string }
+
+func (e *CallError) Error() string { return e.Msg }
+
+// Kind is the CallError kind of err, "" for any other error.
+func Kind(err error) string {
+	var ce *CallError
+	if errors.As(err, &ce) {
+		return ce.Kind
+	}
+	return ""
+}
+
 func Call(path string, req Request, out any, timeout time.Duration) error {
 	if req.Lang == "" {
 		req.Lang = i18n.Lang()
 	}
 	c, err := net.DialTimeout("unix", path, 3*time.Second)
 	if err != nil {
-		if _, serr := os.Stat(path); errors.Is(err, os.ErrNotExist) || errors.Is(serr, os.ErrNotExist) {
-			return fmt.Errorf(i18n.T("servis çalışmıyor (%s soketi yok)", "the service is not running (no socket at %s)"), path)
-		}
-		if errors.Is(err, syscall.ECONNREFUSED) {
+		_, serr := os.Stat(path)
+		switch {
+		case errors.Is(err, os.ErrPermission) || errors.Is(serr, os.ErrPermission):
+			// Not "not running": the service is there and this user may not
+			// talk to it. A Start button would do nothing for that.
+			return &CallError{Kind: KindDenied, Msg: i18n.T("bu kullanıcının servise erişim izni yok (yönetici olarak deneyin)",
+				"this user is not allowed to talk to the service (try as an administrator)")}
+		case errors.Is(err, os.ErrNotExist) || errors.Is(serr, os.ErrNotExist):
+			return &CallError{Kind: KindDown, Msg: fmt.Sprintf(i18n.T("servis çalışmıyor (%s soketi yok)", "the service is not running (no socket at %s)"), path)}
+		case refused(err):
 			// The socket file outlived a daemon that was killed.
-			return fmt.Errorf(i18n.T("servis çalışmıyor (%s soketini dinleyen yok)", "the service is not running (nobody listens on %s)"), path)
+			return &CallError{Kind: KindDown, Msg: fmt.Sprintf(i18n.T("servis çalışmıyor (%s soketini dinleyen yok)", "the service is not running (nobody listens on %s)"), path)}
 		}
-		return err
+		return &CallError{Kind: KindBusy, Msg: i18n.T("servise bağlanılamadı: ", "the service could not be reached: ") + err.Error()}
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(timeout))
+	busy := func(err error) error {
+		// It took the connection and did not answer in time: it runs, and is
+		// busy or stuck. Not the same as off.
+		var ne net.Error
+		if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+			return &CallError{Kind: KindBusy, Msg: fmt.Sprintf(i18n.T("servis %s içinde yanıt vermedi (meşgul olabilir; biraz sonra yeniden deneyin)",
+				"the service did not answer within %s (it may be busy; try again in a moment)"), timeout)}
+		}
+		return &CallError{Kind: KindBusy, Msg: i18n.T("servisle bağlantı koptu: ", "the connection to the service broke: ") + err.Error()}
+	}
 	if err := json.NewEncoder(c).Encode(req); err != nil {
-		return err
+		return busy(err)
 	}
 	var resp Response
 	if err := json.NewDecoder(bufio.NewReader(c)).Decode(&resp); err != nil {
-		return err
+		return busy(err)
 	}
 	if !resp.OK {
+		if resp.Kind == KindBusy {
+			// It runs and has no room for one more request right now. Said
+			// as a plain error this read as "not running" in the apps, with
+			// a hint to install; and it was the one message in English only
+			// (the service does not know the caller's language before it has
+			// read the request).
+			return &CallError{Kind: KindBusy, Msg: i18n.T("servis şu an meşgul (çok fazla denetim bağlantısı açık); biraz sonra yeniden deneyin",
+				"the service is busy right now (too many control connections); try again in a moment")}
+		}
 		return errors.New(resp.Error)
 	}
 	if out != nil && len(resp.Data) > 0 {

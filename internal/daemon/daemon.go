@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -84,16 +85,19 @@ type Daemon struct {
 	log  *slog.Logger
 	opt  Options
 
-	st   *store.Store
-	mon  *netid.Monitor
-	doh  *netx.DoH
-	dial *netx.Dialer
-	obs  *observer.Observer
-	val  *verdict.Validator
-	bins embedded.Bins
-	dns  *sysdns.Manager // nil unless the TUN captures the system
+	st     *store.Store
+	mon    *netid.Monitor
+	doh    *netx.DoH
+	dial   *netx.Dialer
+	obs    *observer.Observer
+	val    *verdict.Validator
+	bins   embedded.Bins
+	dns    *sysdns.Manager // nil unless the TUN captures the system
+	dnsOld *sysdns.Manager // dns_takeover off: only gives back what an earlier run took
 
-	engines []singbox.Engine
+	engGen  atomic.Uint64 // counts changes of an engine's port (checkPorts)
+	engMu   sync.RWMutex
+	engines []singbox.Engine // replaced as a whole, never changed in place (eng, checkPorts)
 	wg      *singbox.WireGuardProfile
 	obsPort int
 
@@ -101,27 +105,37 @@ type Daemon struct {
 	stop      context.CancelFunc // ends Run; set by Run before the control socket opens
 	runCtx    context.Context    // Run's context, for work a control request starts
 	restart   atomic.Bool        // Run returns ErrRestart instead of nil (maint restart)
+	quit      atomic.Bool        // maint shutdown: stay down
 	kick      chan struct{}
 	cands     chan candidate
 	retestGap time.Duration // pause between re-test probes
 
 	// engage-loop only (no lock needed)
-	lastHealth time.Time
-	lastProbe  time.Time // last active (probing) health check that passed
-	seenFlows  int64     // successful observer flows counted at the last check
-	badChecks  int       // failed health checks in a row
-	badSince   time.Time // when the current run of failed checks began
-	dnsRetry   time.Time
-	sbStarted  time.Time // when the current capture was started
-	verified   bool      // a probe through the capture passed since then
-	activeAt   time.Time // when it was first verified
-	failOpens  int       // capture releases in a row, for the re-engage backoff
-	retryAt    time.Time // no new capture before this
-	sbV6       bool      // the running capture includes IPv6
-	sbGateway  string    // the gateway the running capture sends local names to
-	v6Diff     int       // passes in a row that read the opposite IPv6 state
-	retryErr   string    // why the last start failed, shown while waiting to retry
-	toolSeen   bool      // a conflicting DPI tool ran on an earlier pass
+	lastHealth   time.Time
+	lastProbe    time.Time // last active (probing) health check that passed
+	seenFlows    int64     // successful observer flows counted at the last check
+	badChecks    int       // failed health checks in a row
+	badSince     time.Time // when the current run of failed checks began
+	dnsRetry     time.Time
+	sbStarted    time.Time     // when the current capture was started
+	verified     bool          // a probe through the capture passed since then
+	activeAt     time.Time     // when it was first verified
+	failOpens    int           // capture releases in a row, for the re-engage backoff
+	retryAt      time.Time     // no new capture before this
+	retryWait    time.Duration // ... which was scheduled this long ahead (waitLeft)
+	sbEngGen     uint64        // the engine ports (engGen) the running capture was built with
+	sbV6         bool          // the running capture includes IPv6
+	sbGateway    string        // the gateway the running capture sends local names to
+	v6Diff       int           // passes in a row that read the opposite IPv6 state
+	retryErr     string        // why the last start failed, shown while waiting to retry
+	toolSeen     bool          // a conflicting DPI tool ran on an earlier pass
+	wasOffline   bool          // the last pass saw no default route
+	offlineSince time.Time     // since when a running capture has had none
+	lastPass     time.Time     // when the last pass began (wall and monotonic: their difference is sleep)
+	wentOffline  time.Time     // when the default route was last seen to go
+	standbyAt    time.Time     // no new plumbing check before this while one keeps failing
+	standbyFails int           // failed plumbing checks in a row while waiting to engage
+	standbyWhy   string        // what the last of them said
 
 	netChanged atomic.Bool // the network changed: forget the re-engage backoff (set by the monitor, read by the engage loop)
 
@@ -129,20 +143,30 @@ type Daemon struct {
 
 	sys system
 	upd *updater // nil until Run
+	v6  v6State  // whether IPv6 really works on the current network (ipv6.go)
 
-	mu       sync.Mutex
-	state    string
-	detail   string
-	sbPID    int
-	sbStop   func()
-	dnsIf    string // interface whose service's resolver we hold
-	flowSeen map[string]time.Time
-	journal  []JournalEntry
-	judged   map[string]*judgment        // network|site -> last look and Suspect strikes
-	caches   map[string]*hoststate.Cache // network -> open names (see open.go)
-	badAt    time.Time                   // when a health check last failed; zero once one passes
-	findings []audit.Finding             // the system audit's latest result
-	auditSig string                      // what the log last said about it
+	mu          sync.Mutex
+	state       string
+	detail      string
+	sbPID       int
+	sbStop      func()
+	dnsIf       string // interface whose service's resolver we hold
+	flowSeen    map[string]time.Time
+	journal     []JournalEntry
+	judged      map[string]*judgment        // network|site -> last look and Suspect strikes
+	caches      map[string]*hoststate.Cache // network -> open names (see open.go)
+	badAt       time.Time                   // when a health check last failed; zero once one passes
+	findings    []audit.Finding             // the system audit's latest result
+	everActive  bool                        // the capture was verified at least once since start
+	backingOff  bool                        // the last pass only waited out a failed capture
+	backoffHard bool                        // ... and what failed was sing-box itself (retryErr), not the network's checks
+	sbExits     int                         // times the current capture's sing-box has exited by itself
+	sbLastLine  string                      // what it printed last, or why it could not be started
+	sbFatal     string                      // the line in which it said why it stops (FATAL, panic), when there was one
+	sbAlive     bool                        // the supervisor's current sing-box process has not exited
+	sbUpSince   time.Time                   // ... and when it was started
+	selfBroken  bool                        // the last plumbing check failed at the daemon's own observer
+	auditSig    string                      // what the log last said about it
 
 	auditKick chan struct{}
 
@@ -185,7 +209,7 @@ func New(cfg config.Config, p paths.Set, self string, log *slog.Logger) *Daemon 
 			return d.mon.Current()
 		},
 		route:         routeCache.get,
-		hasIPv6:       netx.HasGlobalIPv6,
+		hasIPv6:       d.ipv6Works,
 		foreignTunnel: foreignCache.get,
 		conflict:      sysx.ConflictingTool,
 		tunUp:         func() bool { return netx.InterfaceWithIP(singbox.TunIP) != "" },
@@ -224,22 +248,23 @@ func (d *Daemon) planEngines() error {
 			d.log.Info("engine tlsspoof skipped: injecting the decoy needs root")
 			continue
 		}
+		if name == "warp" {
+			// A profile that cannot be used takes this one engine out, not
+			// the service: the others open what they open, and a daemon that
+			// refused to start here would be started again every ten seconds
+			// with nothing on screen but "not running".
+			wg, err := readWarp(d.cfg.WarpProfile)
+			if err != nil {
+				d.log.Error("engine warp skipped: its profile cannot be used", "file", d.cfg.WarpProfile, "err", err)
+				continue
+			}
+			d.wg = wg
+		}
 		port, err := freePort()
 		if err != nil {
 			return err
 		}
 		d.engines = append(d.engines, singbox.Engine{Name: name, Kind: kinds[name], Port: port})
-		if name == "warp" {
-			f, err := os.Open(d.cfg.WarpProfile)
-			if err != nil {
-				return fmt.Errorf("warp profile: %w", err)
-			}
-			d.wg, err = singbox.ParseWgcf(f)
-			f.Close()
-			if err != nil {
-				return err
-			}
-		}
 	}
 	if len(d.engines) == 0 {
 		return errors.New("no usable engine in the configured ladder")
@@ -247,17 +272,75 @@ func (d *Daemon) planEngines() error {
 	return nil
 }
 
-func (d *Daemon) engineNames() []string {
-	names := make([]string, len(d.engines))
+func readWarp(file string) (*singbox.WireGuardProfile, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return singbox.ParseWgcf(f)
+}
+
+// eng is the engine ladder as it is now.
+func (d *Daemon) eng() []singbox.Engine {
+	d.engMu.RLock()
+	defer d.engMu.RUnlock()
+	return d.engines
+}
+
+// portFree reports whether a loopback listener can be opened on port.
+func portFree(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	ln.Close()
+	return true
+}
+
+// checkPorts gives every engine for which mine holds a new port when its own
+// has been taken. The ports are picked once at start and are free whenever
+// their owner is not running (sing-box while there is no capture, ciadpi
+// while paused); a program that took one meanwhile would otherwise keep the
+// engine from starting, with "address already in use", for as long as the
+// daemon lives. Called only while the owner is down.
+func (d *Daemon) checkPorts(mine func(singbox.Engine) bool) {
+	d.engMu.Lock()
+	defer d.engMu.Unlock()
+	var next []singbox.Engine
 	for i, e := range d.engines {
+		if !mine(e) || portFree(e.Port) {
+			continue
+		}
+		port, err := freePort()
+		if err != nil {
+			continue
+		}
+		if next == nil {
+			next = append([]singbox.Engine(nil), d.engines...)
+		}
+		d.log.Warn("engine port was taken by another program, using a new one", "engine", e.Name, "was", e.Port, "now", port)
+		next[i].Port = port
+	}
+	if next != nil {
+		d.engines = next
+		d.engGen.Add(1)
+	}
+}
+
+func (d *Daemon) engineNames() []string {
+	engines := d.eng()
+	names := make([]string, len(engines))
+	for i, e := range engines {
 		names[i] = e.Name
 	}
 	return names
 }
 
 func (d *Daemon) observerEngines() []observer.Engine {
-	out := make([]observer.Engine, len(d.engines))
-	for i, e := range d.engines {
+	engines := d.eng()
+	out := make([]observer.Engine, len(engines))
+	for i, e := range engines {
 		out[i] = observer.Engine{Name: e.Name, Addr: e.Addr()}
 	}
 	return out
@@ -299,12 +382,33 @@ func (d *Daemon) Run(ctx context.Context, opt Options) error {
 		if err := sysx.ShareConfig(d.p.Config); err != nil && !errors.Is(err, os.ErrNotExist) {
 			d.log.Warn("config.json stays unreadable for signed-in users", "err", err)
 		}
+		// Windows: the programs every signed-in user runs. An update made by
+		// a version before this one left them with the directory's
+		// administrators-only access; the version it installed puts that
+		// right when it starts.
+		for _, f := range []string{d.p.Installed, filepath.Join(d.p.Support, "autodpi-tray.exe")} {
+			if runtime.GOOS != "windows" {
+				break
+			}
+			if err := sysx.SecureExe(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+				d.log.Warn("the program stays closed to signed-in users", "file", f, "err", err)
+			}
+		}
 	}
-	if !opt.NoTun && opt.TestPort == 0 && d.cfg.DNSTakeover {
-		d.dns = &sysdns.Manager{File: d.p.DNSSaved, Log: d.log}
-		// A previous run that died holding the resolver left the original here.
-		if err := d.dns.Release(); err != nil {
+	if !opt.NoTun && opt.TestPort == 0 {
+		// A previous run that could not give the resolver back left the
+		// original here: one that died, or one stopped at shutdown, when
+		// macOS no longer lets the network settings be changed. Whatever the
+		// setting says now: with dns_takeover since turned off nothing else
+		// would ever restore it.
+		dns := &sysdns.Manager{File: d.p.DNSSaved, Log: d.log}
+		if err := dns.Release(); err != nil {
 			d.log.Warn("restore system resolver", "err", err)
+		}
+		if d.cfg.DNSTakeover {
+			d.dns = dns
+		} else {
+			d.dnsOld = dns // only ever to give back what an earlier run took
 		}
 	}
 	var err error
@@ -333,7 +437,7 @@ func (d *Daemon) Run(ctx context.Context, opt Options) error {
 		return err
 	}
 
-	d.dial = &netx.Dialer{Timeout: 6 * time.Second}
+	d.dial = &netx.Dialer{Timeout: 12 * time.Second}
 	d.doh = netx.NewDoHServers(d.dial, d.cfg.DoHServers)
 	d.mon = &netid.Monitor{DoH: d.doh, Log: d.log, OnChange: d.onNetChange}
 	d.val = &verdict.Validator{
@@ -386,7 +490,7 @@ func (d *Daemon) Run(ctx context.Context, opt Options) error {
 	}
 	for _, e := range d.engines {
 		if e.Name == "ciadpi" {
-			spawn(func() { d.ciadpiLoop(ctx, e.Port) })
+			spawn(func() { d.ciadpiLoop(ctx) })
 		}
 	}
 	spawn(func() { _ = d.obs.Serve(ln) })
@@ -416,15 +520,44 @@ func (d *Daemon) Run(ctx context.Context, opt Options) error {
 
 	<-ctx.Done()
 	d.log.Info("shutting down")
+	// A shutdown that does not finish (a lock held for good, a helper that
+	// cannot be reaped) would leave a process the service manager counts as
+	// running: no restart, no update, no rollback, and the capture maybe
+	// still up. Past the limit the process ends itself; its helpers go with
+	// it (guard, job object), and the next start gives the resolver back.
+	watchdog := time.AfterFunc(shutdownMax, func() {
+		d.log.Error("shutdown did not finish, exiting", "after", shutdownMax)
+		// Only a shutdown the user asked for stays down. Anything else that
+		// ended Run (a restart, an update, the control socket failing) is
+		// started again by the service manager, which needs a failure code.
+		if d.quit.Load() && !d.restart.Load() {
+			exit(0)
+		}
+		exit(1)
+	})
+	defer watchdog.Stop()
 	d.stopSingBox() // first: give the network back before anything else goes away
 	d.obs.Close()
 	wg.Wait()
 	d.releaseDNS() // again: the engage loop may have retaken it while stopping
+	if ctlErr == nil {
+		// An orderly stop, a restart from the settings page included, is not
+		// the new version failing. (After an install or a rollback there is
+		// nothing to forgive.)
+		d.upd.forgiveStart()
+	}
 	if ctlErr == nil && d.restart.Load() {
 		return ErrRestart
 	}
 	return ctlErr
 }
+
+// shutdownMax is how long an orderly shutdown may take; exit ends the process
+// after that. Variables so that tests can watch instead of dying.
+var (
+	shutdownMax = 18 * time.Second // below launchd's ExitTimeOut (20 s, internal/launchd) and the Windows stop wait
+	exit        = os.Exit
+)
 
 // ErrRestart is what Run returns after `maint restart`: the process must exit
 // non-zero so launchd (KeepAlive SuccessfulExit=false) or the SCM (recovery
@@ -433,9 +566,10 @@ var ErrRestart = errors.New("restart requested")
 
 // ciadpiLoop keeps ciadpi running while the service is not paused: a pause
 // gives all traffic back, so the proxy goes too.
-func (d *Daemon) ciadpiLoop(ctx context.Context, port int) {
+func (d *Daemon) ciadpiLoop(ctx context.Context) {
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
+	isCiadpi := func(e singbox.Engine) bool { return e.Name == "ciadpi" }
 	for {
 		for d.st.Paused() {
 			select {
@@ -444,20 +578,69 @@ func (d *Daemon) ciadpiLoop(ctx context.Context, port int) {
 				return
 			}
 		}
-		cctx, cancel := context.WithCancel(ctx)
-		done := make(chan struct{})
-		go func() { defer close(done); supervise.Keep(cctx, d.ciadpiSpec(port), nil) }()
+		// Started here, one process at a time, instead of by supervise.Keep:
+		// before every start its port is looked at again. Kept running under
+		// one fixed port, a ciadpi that had crashed and lost its port to
+		// another program failed with "address already in use" for good.
+		backoff := time.Second
 		for !d.st.Paused() && ctx.Err() == nil {
+			d.restoreHelpers(d.bins.Ciadpi)
+			d.checkPorts(isCiadpi) // it is not running: its port may have gone to someone else
+			port := 0
+			for _, e := range d.eng() {
+				if isCiadpi(e) {
+					port = e.Port
+				}
+			}
+			spec := d.ciadpiSpec(port)
+			started := time.Now()
+			p, err := supervise.Start(spec)
+			if err != nil {
+				spec.Log.Error(supervise.MsgStartFailed, "proc", spec.Name, "err", err)
+			} else {
+				running := true
+				for running && !d.st.Paused() && ctx.Err() == nil {
+					select {
+					case <-p.Done():
+						running = false
+						spec.Log.Warn(supervise.MsgExited, "proc", spec.Name, "err", p.Err(), "after", time.Since(started).Round(time.Millisecond))
+					case <-tick.C:
+					case <-ctx.Done():
+					}
+				}
+				if running {
+					p.Stop(5 * time.Second)
+					break // paused or stopping
+				}
+				// What failed while it was going down says nothing about the
+				// servers (see engineGone).
+				d.engineGone()
+			}
+			if time.Since(started) > 30*time.Second {
+				backoff = time.Second
+			}
 			select {
-			case <-tick.C:
+			case <-time.After(backoff):
 			case <-ctx.Done():
 			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
 		}
-		cancel()
-		<-done
 		if ctx.Err() != nil {
 			return
 		}
+	}
+}
+
+// engineGone is called when an engine's process ended by itself. Flows it
+// carried at that moment failed with a close or a reset right after
+// connecting, which is also what a server turning them away looks like, and
+// the destination would be set aside for ten minutes although the engine
+// that opens it is back in a second.
+func (d *Daemon) engineGone() {
+	if d.obs != nil {
+		d.obs.ForgetDead()
 	}
 }
 
@@ -531,7 +714,7 @@ func (d *Daemon) applyList() {
 	key := d.sys.network().Key
 	names := d.engineNames()
 	by := d.st.ByEngine(key, names, names[0])
-	for _, e := range d.engines {
+	for _, e := range d.eng() {
 		if err := singbox.WriteRuleSet(d.p.Run, e.Name, by[e.Name]); err != nil {
 			d.log.Error("write rule-set", "engine", e.Name, "err", err)
 		}
@@ -625,8 +808,45 @@ func (d *Daemon) engageLoop(ctx context.Context) {
 }
 
 func (d *Daemon) reconcile(ctx context.Context) {
+	backingOff := false
+	defer func() {
+		d.mu.Lock()
+		d.backingOff, d.backoffHard = backingOff, backingOff && d.retryErr != ""
+		d.mu.Unlock()
+	}()
 	if d.netChanged.Swap(false) {
 		d.failOpens, d.retryAt, d.retryErr = 0, time.Time{}, ""
+		d.standbyAt, d.standbyFails = time.Time{}, 0
+	}
+	// The wall clock ran on while the monotonic one stood still: the machine
+	// slept. (A clock set forward reads the same and costs one early check.)
+	now := time.Now()
+	if !d.lastPass.IsZero() {
+		if slept := now.Round(0).Sub(d.lastPass.Round(0)) - now.Sub(d.lastPass); slept > wakeGap {
+			d.log.Info("woke from sleep", "asleep", slept.Round(time.Second))
+			d.afterOutage(true)
+		}
+	}
+	d.lastPass = now
+	online := d.sys.network().Online
+	switch {
+	case online && d.wasOffline:
+		// While the link was down every path failed at once, engines
+		// included, and that read as servers refusing. Nothing from then
+		// counts now that it is back.
+		gone := failOpenAfter // not seen going: counts as long
+		if !d.wentOffline.IsZero() {
+			gone = time.Since(d.wentOffline)
+			d.log.Info("default route is back", "gone_for", gone.Round(time.Second))
+		}
+		d.afterOutage(gone >= failOpenAfter)
+	case !online && !d.wasOffline:
+		d.wentOffline = now
+		d.log.Info("default route is gone")
+	}
+	d.wasOffline = !online
+	if !d.running() {
+		d.settleDNS()
 	}
 	tool := d.conflict()
 	if tool == "" && d.toolSeen {
@@ -636,7 +856,13 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	d.toolSeen = tool != ""
 	switch {
 	case d.st.Paused():
-		d.stopSingBox()
+		if d.running() {
+			d.stopSingBox()
+		} // else settleDNS above has the resolver, at its own pace
+		// Pausing and resuming is how a user says "try again now": the wait
+		// after earlier failures does not outlive it.
+		d.failOpens, d.retryAt, d.retryErr = 0, time.Time{}, ""
+		d.standbyAt, d.standbyFails = time.Time{}, 0
 		d.setState(StatePaused, "")
 	case d.running():
 		if tool != "" {
@@ -644,7 +870,48 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			d.setState(StateStandby, tool+" is running and rewrites the same packets; capture released")
 			return
 		}
+		// The default route is gone and stays gone: on a network that only
+		// has IPv6 left, say. The capture holds DNS at an address that cannot
+		// be reached and the checks below do not run while offline, so it
+		// would sit there "active" for good. A blip is waited out.
+		if online {
+			d.offlineSince = time.Time{}
+		} else if d.offlineSince.IsZero() {
+			d.offlineSince = time.Now()
+		} else if time.Since(d.offlineSince) > offlineRelease {
+			d.stopSingBox()
+			d.offlineSince = time.Time{}
+			d.setState(StateOffline, "no default route; capture released")
+			return
+		}
+		// An engine moved to another port since the capture was built (its
+		// old one was taken while it was down): sing-box still sends that
+		// engine's sites to the old port, which is now someone else's.
+		if d.engGen.Load() != d.sbEngGen {
+			d.note("capture", "sing-box", "an engine's port changed, restarting capture")
+			d.stopSingBox()
+			return
+		}
+		if why := d.singBoxBroken(); why != "" {
+			d.releaseWait("sing-box does not start: "+why, StateError, brokenRetryMax)
+			return
+		}
 		if !d.captureUp() {
+			if d.verified {
+				// A capture that worked and lost its sing-box (a crash after
+				// hours of work): the network goes back at once, as for any
+				// failure, but this is not a program that cannot start. It
+				// used to read "did not bring the capture up in 30s", as an
+				// error, although it had been up all day.
+				// The first time in a row it is started again after a few
+				// seconds; one that keeps stopping waits longer each time.
+				var most time.Duration
+				if d.failOpens == 0 {
+					most = 5 * time.Second
+				}
+				d.releaseWait("sing-box stopped by itself", StateStandby, most)
+				return
+			}
 			if time.Since(d.sbStarted) > 30*time.Second {
 				d.release("sing-box did not bring the capture up in 30s", StateError)
 				return
@@ -695,8 +962,9 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	case tool != "":
 		// Ahead of the backoff wait: the tool, not the network, is the reason.
 		d.setState(StateStandby, tool+" is running and rewrites the same packets; engages once it is closed")
-	case time.Now().Before(d.retryAt):
-		left := time.Until(d.retryAt).Round(time.Second)
+	case waitLeft(&d.retryAt, d.retryWait) > 0:
+		backingOff = true
+		left := wallUntil(d.retryAt).Round(time.Second)
 		if d.retryErr != "" {
 			d.setState(StateError, fmt.Sprintf("%s; next attempt in %s", d.retryErr, left))
 			return
@@ -707,20 +975,36 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			d.setState(StateStandby, "another tunnel owns the traffic ("+ifc+"); engages once it is gone")
 			return
 		}
+		// A check that keeps failing (a login page, a network that blocks
+		// the resolvers) is not run again on every pass: each one is a DoH
+		// query per resolver and TLS handshakes.
+		if d.standbyFails > 0 && waitLeft(&d.standbyAt, standbyMost) > 0 {
+			d.setState(StateStandby, "not engaging, health check failed: "+d.standbyWhy)
+			return
+		}
 		// Never take over DNS and TCP/443 unless the plumbing we depend on works.
 		err := d.sys.healthy(ctx)
 		if ctx.Err() != nil {
 			return // shutting down: a check cut short says nothing about the network
 		}
 		d.recordHealth(err)
+		d.mu.Lock()
+		// The resolvers answered and the observer's own loopback test did
+		// not: that is this program, not the network.
+		d.selfBroken = err != nil && strings.HasPrefix(err.Error(), observerSelfTest)
+		d.mu.Unlock()
 		if err != nil {
+			d.standbyFails++
+			d.standbyWhy = err.Error()
+			d.standbyAt = time.Now().Round(0).Add(min(standbyFirst<<min(d.standbyFails-1, 4), standbyMost))
 			d.setState(StateStandby, "not engaging, health check failed: "+err.Error())
 			return
 		}
+		d.standbyAt, d.standbyFails = time.Time{}, 0
 		if err := d.startSingBox(ctx); err != nil {
 			// Same backoff as a release: a start that cannot work (disk, config,
 			// binaries) must not re-run the health probe every pass.
-			d.retryErr = err.Error()
+			d.retryErr = briefReason(err.Error()) // the wait that follows it must stay in view
 			wait := d.backoff()
 			d.setState(StateError, fmt.Sprintf("%s; retry in %s", err, wait))
 			return
@@ -730,6 +1014,45 @@ func (d *Daemon) reconcile(ctx context.Context) {
 		d.sbStarted, d.verified = time.Now(), false
 		d.setState(StateStarting, "capture starting")
 	}
+}
+
+// How long the wall clock must have run ahead of the monotonic one between
+// two passes to count as sleep, and the wait between plumbing checks while
+// they keep failing in standby (15s, then every 30s). Variables so that tests
+// need not wait.
+var (
+	wakeGap      = 20 * time.Second
+	standbyFirst = 15 * time.Second
+	standbyMost  = 30 * time.Second
+)
+
+// afterOutage is what the network coming back (a default route again, or the
+// machine waking) means for everything that was open or measured before:
+// the resolver connections are dead without knowing it, what failed then
+// proves nothing now, and the capture is checked at once, with a real probe,
+// instead of on the strength of flows that may be from before. (The capture
+// is not rebuilt for it: sing-box resets its own connections when the route
+// returns, and nothing measured so far shows it coming back stale.)
+//
+// long says the outage was a real one (the machine slept, or the route was
+// gone for as long as the fail-open brake takes). Only then does a run of
+// failed checks start afresh. On a link that drops for a few seconds again
+// and again (weak Wi-Fi, a phone hotspot) every return used to clear the
+// run, so a capture that passed nothing was never given back: three failed
+// checks over a minute and a half never came together.
+func (d *Daemon) afterOutage(long bool) {
+	d.doh.Reset()
+	netx.InvalidatePhysical()
+	if d.obs != nil {
+		d.obs.ForgetDead()
+	}
+	d.v6.expire()
+	d.lastHealth, d.lastProbe = time.Time{}, time.Time{}
+	if long {
+		d.badChecks, d.badSince = 0, time.Time{}
+	}
+	d.offlineSince = time.Time{}
+	d.standbyAt, d.standbyFails = time.Time{}, 0
 }
 
 // conflict reports another DPI-bypass program working on the same packets
@@ -746,9 +1069,12 @@ func (d *Daemon) conflict() string {
 // captureUp reports whether sing-box runs and, in TUN mode, its utun exists.
 func (d *Daemon) captureUp() bool {
 	d.mu.Lock()
-	pid := d.sbPID
+	pid, alive := d.sbPID, d.sbAlive
 	d.mu.Unlock()
-	if pid == 0 {
+	// alive: the pid is cleared only when the supervisor gives up, so between
+	// a crash and the restart it still names the dead process. Without the
+	// TUN to look at (the test inbound) that read as "up".
+	if pid == 0 || !alive {
 		return false
 	}
 	return d.opt.TestPort != 0 || d.sys.tunUp()
@@ -756,10 +1082,24 @@ func (d *Daemon) captureUp() bool {
 
 // release gives the network back after a failure and schedules the next
 // attempt with exponential backoff, so a broken path does not flap.
-func (d *Daemon) release(why, state string) {
+//
+// A release because sing-box itself failed stays an error while it waits: the
+// program is broken, and "standby" would read as if it were merely waiting for
+// something. A release because the network's checks failed is standby.
+func (d *Daemon) release(why, state string) { d.releaseWait(why, state, 0) }
+
+// releaseWait is release with the wait capped at most (0: no cap).
+func (d *Daemon) releaseWait(why, state string, most time.Duration) {
 	d.stopSingBox()
 	d.retryErr = ""
+	if state == StateError {
+		d.retryErr = why
+	}
 	wait := d.backoff()
+	if most > 0 && wait > most {
+		wait = most
+		d.retryAt, d.retryWait = time.Now().Round(0).Add(wait), wait
+	}
 	d.setState(state, fmt.Sprintf("%s; capture released, retry in %s", why, wait))
 }
 
@@ -768,7 +1108,9 @@ func (d *Daemon) release(why, state string) {
 func (d *Daemon) backoff() time.Duration {
 	d.failOpens++
 	wait := 30 * time.Second << min(d.failOpens-1, 5)
-	d.retryAt = time.Now().Add(wait)
+	// By the wall clock: a wait that began before the lid closed is over
+	// when it opens again, not sixteen waking minutes later.
+	d.retryAt, d.retryWait = time.Now().Round(0).Add(wait), wait
 	return wait
 }
 
@@ -865,10 +1207,14 @@ func (d *Daemon) healthy(ctx context.Context) error {
 	}
 	p := &probe.Prober{Dial: probe.ViaSocks(fmt.Sprintf("127.0.0.1:%d", d.obsPort)), Timeout: 4 * time.Second}
 	if r := anyTLS(cctx, p, probeTargetsFor(d.cfg.DoHServers)); r.Outcome != probe.OK {
-		return fmt.Errorf("observer self-test: %v", r)
+		return fmt.Errorf(observerSelfTest+": %v", r)
 	}
 	return nil
 }
+
+// observerSelfTest starts the plumbing check's error when what failed is the
+// observer's relay on loopback, after the resolvers had answered.
+const observerSelfTest = "observer self-test"
 
 // Fail-open needs the failure to persist: this many failed checks in a row
 // spread over at least failOpenAfter. Three timeouts in 30s (a resolver
@@ -883,13 +1229,23 @@ const (
 // (with backoff) until things work again. Its first pass after a start is what
 // verifies the capture.
 func (d *Daemon) watch(ctx context.Context) {
-	if time.Since(d.lastHealth) < healthEvery {
+	// A capture that has not been verified yet is looked at again soon: its
+	// first check often runs before sing-box listens, and waiting a whole
+	// health period for the second left the state on "starting" for half a
+	// minute after every start and resume (measured: 35 s against 2 s).
+	// Only the first few: one that keeps failing goes back to the ordinary
+	// period, or it would be probed back to back (a DoH query and three TLS
+	// handshakes each time) until the fail-open brake ends it.
+	every := healthEvery
+	if !d.verified && d.badChecks < verifyFast {
+		every = verifyEvery
+	}
+	if time.Since(d.lastHealth) < every {
 		return
 	}
 	d.lastHealth = time.Now()
 	if !d.sys.network().Online {
-		d.badChecks, d.badSince = 0, time.Time{} // a failure run does not span an outage
-		return
+		return // nothing to check; whether a failure run outlives this is afterOutage's call
 	}
 	// Flows the capture carried to a server since the last check prove the
 	// path works (TUN, sing-box, observer). Probing would add a DoH query and
@@ -899,7 +1255,9 @@ func (d *Daemon) watch(ctx context.Context) {
 		n := d.sys.flows()
 		busy := n > d.seenFlows
 		d.seenFlows = n
-		if busy && time.Since(d.lastProbe) < probeEvery {
+		// Not while checks are failing: then only a check that passes says
+		// the path works again.
+		if busy && d.badChecks == 0 && time.Since(d.lastProbe) < probeEvery {
 			d.recordHealth(nil)
 			d.badChecks, d.badSince = 0, time.Time{}
 			if time.Since(d.activeAt) > 10*time.Minute {
@@ -916,6 +1274,13 @@ func (d *Daemon) watch(ctx context.Context) {
 		return // shutting down: a check cut short says nothing about the network
 	}
 	d.recordHealth(err)
+	// The check's own connections went through the observer and were counted
+	// as flows. Left in the count, a failed check looked like traffic to the
+	// next pass, which then skipped its check and cleared the failures: the
+	// fail-open brake took seven minutes instead of a minute and a half.
+	if d.sys.flows != nil {
+		d.seenFlows = d.sys.flows()
+	}
 	if err != nil {
 		if d.badChecks == 0 {
 			d.badSince = time.Now()
@@ -927,6 +1292,9 @@ func (d *Daemon) watch(ctx context.Context) {
 			d.release(fmt.Sprintf("fail-open: checks failing for %s: %v", failOpenAfter, err), StateStandby)
 		}
 		return
+	}
+	if d.badChecks > 0 {
+		d.log.Info("health checks pass again", "after_failed", d.badChecks)
 	}
 	d.badChecks, d.badSince = 0, time.Time{}
 	d.lastProbe = time.Now()
@@ -977,6 +1345,14 @@ func (d *Daemon) networkHasIPv6() bool {
 }
 
 func (d *Daemon) startSingBox(ctx context.Context) error {
+	d.restoreHelpers(d.bins.SingBox)
+	// sing-box is down: the ports it listens on for the engines are free,
+	// unless someone else has taken one meanwhile.
+	d.checkPorts(func(e singbox.Engine) bool { return e.Kind != singbox.Socks })
+	// Read before the ports are: a port that changes after this (ciadpi's,
+	// which its own loop looks after) leaves the count ahead of this one,
+	// and the next pass builds the capture again with the right port.
+	d.sbEngGen = d.engGen.Load()
 	d.sbV6, d.v6Diff = d.opt.TestPort == 0 && d.networkHasIPv6(), 0
 	d.sbGateway = d.sys.network().Gateway
 	net := d.sys.network()
@@ -985,7 +1361,7 @@ func (d *Daemon) startSingBox(ctx context.Context) error {
 	}
 	d.applyList()
 	cfg, err := singbox.Build(singbox.Options{
-		Engines: d.engines, ObserverPort: d.obsPort, RuleDir: d.p.Run,
+		Engines: d.eng(), ObserverPort: d.obsPort, RuleDir: d.p.Run,
 		Tun: d.opt.TestPort == 0, TestPort: d.opt.TestPort,
 		BlockQUIC: d.cfg.BlockQUIC, IPv4Only: d.cfg.IPv4Only, WireGuard: d.wg, SpoofSNI: d.cfg.SpoofSNI,
 		IPv6: d.sbV6, DoH: d.cfg.DoHServers,
@@ -1004,8 +1380,11 @@ func (d *Daemon) startSingBox(ctx context.Context) error {
 	}
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	d.mu.Lock()
+	d.sbExits, d.sbLastLine, d.sbFatal, d.sbAlive = 0, "", "", false
+	d.mu.Unlock()
 	spec := supervise.Spec{
-		Name: "sing-box", Path: d.bins.SingBox, Self: d.self, Log: d.log,
+		Name: "sing-box", Path: d.bins.SingBox, Self: d.self, Log: slog.New(helperTap{d.log.Handler(), d}),
 		Args: []string{"--disable-color", "run", "-c", cfgPath},
 		Env:  helperGoEnv(),
 	}
@@ -1017,12 +1396,174 @@ func (d *Daemon) startSingBox(ctx context.Context) error {
 	d.mu.Lock()
 	d.sbStop = func() { cancel(); <-done }
 	d.mu.Unlock()
-	mode := "TUN on"
+	mode := "TUN on, IPv4 only"
+	if d.sbV6 {
+		mode = "TUN on, IPv4 and IPv6"
+	}
 	if d.opt.TestPort != 0 {
 		mode = fmt.Sprintf("test inbound 127.0.0.1:%d (no TUN)", d.opt.TestPort)
 	}
 	d.note("capture", "sing-box", mode+" · network "+net.Label)
 	return nil
+}
+
+// restoreHelpers extracts the helper programs again when file is gone (a
+// cleaner, an antivirus quarantine, a hand in the install directory): they
+// are written once at start, and without this the helper "cannot be started"
+// until the daemon itself is.
+func (d *Daemon) restoreHelpers(file string) {
+	if file == "" || !embedded.Embedded() {
+		return
+	}
+	if _, err := os.Stat(file); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if _, err := embedded.Prepare(d.p.Bin); err != nil {
+		d.log.Error("helper program is missing and could not be written again", "file", file, "err", err)
+		return
+	}
+	d.log.Warn("helper program was missing and has been written again", "file", file)
+}
+
+// helperTap passes sing-box's log records on and tells the daemon about its
+// exits and its last words, which is all there is to say why it does not run.
+type helperTap struct {
+	slog.Handler
+	d *Daemon
+}
+
+func (h helperTap) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h helperTap) Handle(ctx context.Context, r slog.Record) error {
+	switch r.Message {
+	case supervise.MsgExited, supervise.MsgStartFailed:
+		why := ""
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "err" {
+				why = a.Value.String()
+			}
+			return true
+		})
+		h.d.sbExited(why)
+	default:
+		h.d.sbPrinted(r.Message)
+	}
+	if !h.Handler.Enabled(ctx, r.Level) {
+		return nil
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h helperTap) WithAttrs(a []slog.Attr) slog.Handler {
+	return helperTap{h.Handler.WithAttrs(a), h.d}
+}
+func (h helperTap) WithGroup(n string) slog.Handler { return helperTap{h.Handler.WithGroup(n), h.d} }
+
+var (
+	helperNoise = regexp.MustCompile(`\x1b\[[0-9;]*m|^\s*(FATAL|ERROR|PANIC|WARN)\[\d+\]\s*`)
+	helperFatal = regexp.MustCompile(`^\s*(?:\x1b\[[0-9;]*m)*(FATAL\b|panic:|fatal error:)`)
+)
+
+// How a sing-box that cannot start is told from one that stumbled once at a
+// bad moment (the adapter or the firewall not ready right after boot or wake):
+// it has exited brokenExits times, and brokenAfter has passed since the
+// capture was started. The supervisor restarts it after 1, 2, 4 s, so that is
+// three or four tries. The wait before the next round does not grow beyond
+// brokenRetryMax. Variables so that tests need not wait.
+var (
+	brokenExits    = 3
+	brokenAfter    = 10 * time.Second
+	brokenRetryMax = 5 * time.Minute
+	quickExit      = 5 * time.Second // a process that lasted this long did not "exit at once"
+)
+
+// sbPrinted remembers the last line sing-box printed, without colors and its
+// own level and clock prefix, and separately the line that says why it died:
+// after a crash the last line is the tail of a stack trace.
+func (d *Daemon) sbPrinted(line string) {
+	fatal := helperFatal.MatchString(line)
+	for range 2 { // the prefix sits behind a color code
+		line = helperNoise.ReplaceAllString(line, "")
+	}
+	if line = strings.TrimSpace(line); line == "" {
+		return
+	}
+	if r := []rune(line); len(r) > 160 {
+		line = string(r[:159]) + "…"
+	}
+	d.mu.Lock()
+	d.sbLastLine = line
+	if fatal {
+		d.sbFatal = line
+	}
+	d.mu.Unlock()
+}
+
+// sbExited counts an exit nobody asked for. why is the exit error, kept only
+// when sing-box said nothing itself.
+func (d *Daemon) sbExited(why string) {
+	d.mu.Lock()
+	if d.sbAlive && time.Since(d.sbUpSince) >= quickExit {
+		d.sbExits = 0 // it ran for a while: not one that exits at once, start counting afresh
+	}
+	d.sbAlive = false
+	d.sbExits++
+	if d.sbLastLine == "" && why != "" && why != "<nil>" {
+		d.sbLastLine = why
+	}
+	d.mu.Unlock()
+	d.engineGone() // it hosts the TLS engines
+}
+
+// singBoxBroken returns why sing-box does not run when it keeps exiting
+// without the capture ever having worked (see brokenExits): that is this
+// build, its configuration or this machine. "" otherwise. Engage loop only.
+func (d *Daemon) singBoxBroken() string {
+	if d.verified {
+		return "" // it worked: what follows is the watch's business
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sbAlive {
+		// Never while a try is running: the earlier ones failed while
+		// something was not ready yet (the adapter or the firewall service
+		// right after boot or wake), and killing this one for their exits
+		// would turn a start that healed itself into an error. One that also
+		// exits at once is dead again by the next pass or the one after.
+		if time.Since(d.sbUpSince) >= quickExit {
+			d.sbExits = 0
+		}
+		return ""
+	}
+	if d.sbExits < brokenExits || time.Since(d.sbStarted) < brokenAfter {
+		return ""
+	}
+	switch {
+	case d.sbFatal != "":
+		return briefReason(d.sbFatal)
+	case d.sbLastLine != "":
+		return briefReason(d.sbLastLine)
+	}
+	return "it exits at once"
+}
+
+// briefReason keeps the end of a long error, which is where the cause is:
+// "decode config at C:\ProgramData\...\config.json: inbounds[0]: unknown
+// inbound type: tun" names the file first and the reason last, and the tray
+// tooltip and the two-line detail in the apps cut the end off.
+func briefReason(s string) string {
+	const most = 90
+	for len([]rune(s)) > most {
+		i := strings.Index(s, ": ")
+		if i < 0 || i+2 >= len(s) {
+			break
+		}
+		s = s[i+2:]
+	}
+	if r := []rune(s); len(r) > most {
+		s = "…" + string(r[len(r)-most+1:])
+	}
+	return s
 }
 
 // holdDNS points the system resolver into the TUN (see sysdns) once sing-box
@@ -1061,6 +1602,33 @@ func (d *Daemon) releaseDNS() {
 	d.mu.Unlock()
 }
 
+// settleDNS gives the resolver back when it is still held although no capture
+// runs: the restore failed when the capture was released (networksetup does at
+// times, and always at shutdown). Tried again every dnsRetry until it works.
+// Engage loop only.
+func (d *Daemon) settleDNS() {
+	dns := d.dns
+	if dns == nil {
+		dns = d.dnsOld // dns_takeover is off now, but an earlier run's hold may be left
+	}
+	if dns == nil || time.Now().Before(d.dnsRetry) || !dns.Holding() {
+		return
+	}
+	if err := dns.Release(); err != nil {
+		d.log.Error("restore system resolver", "err", err)
+	}
+	d.mu.Lock()
+	d.dnsIf = ""
+	d.mu.Unlock()
+	if dns.Holding() {
+		d.dnsRetry = time.Now().Add(30 * time.Second)
+	}
+}
+
+// offlineRelease is how long the default route may be gone before a running
+// capture is given up. A variable so that tests need not wait.
+var offlineRelease = time.Minute
+
 func (d *Daemon) stopSingBox() {
 	d.releaseDNS() // first: queries to 1.1.1.1 must not outlive the hijack
 	d.mu.Lock()
@@ -1081,6 +1649,12 @@ func (d *Daemon) stopSingBox() {
 func (d *Daemon) setPID(pid int) {
 	d.mu.Lock()
 	d.sbPID = pid
+	if pid != 0 {
+		d.sbLastLine, d.sbFatal = "", "" // a new process: its last words are its own
+		d.sbAlive, d.sbUpSince = true, time.Now()
+	} else {
+		d.sbAlive = false
+	}
 	d.mu.Unlock()
 }
 
@@ -1089,6 +1663,9 @@ func (d *Daemon) setState(s, detail string) {
 	changed := d.state != s || detailKind(d.detail) != detailKind(detail)
 	activated := s == StateActive && d.state != StateActive
 	d.state, d.detail = s, detail
+	if s == StateActive {
+		d.everActive = true
+	}
 	d.mu.Unlock()
 	if changed {
 		d.note("state", s, detail)
@@ -1223,6 +1800,8 @@ func summarize(results map[string]string) string {
 			kind = "reset"
 		case strings.Contains(r, "timeout") || strings.Contains(r, "deadline"):
 			kind = "timeout"
+		case strings.Contains(r, "unreachable"), strings.Contains(r, "network is down"), strings.Contains(r, "no route to host"):
+			kind = "unreachable" // this machine has no way there: not a server refusing
 		case strings.Contains(r, "refused"):
 			kind = "refused"
 		case strings.Contains(r, "EOF"):
@@ -1261,6 +1840,10 @@ const (
 	// each one is a DoH query plus three TLS handshakes, two of them through
 	// sing-box.
 	healthEvery = 30 * time.Second
+	// verifyEvery is the time between checks of a capture that has not passed
+	// one yet.
+	verifyEvery = 5 * time.Second
+	verifyFast  = 3 // ... for this many failed checks in a row
 	// probeEvery is how often the active probe still runs while real traffic
 	// through the capture shows it works (see watch).
 	probeEvery = 5 * time.Minute
@@ -1525,7 +2108,7 @@ func (d *Daemon) applyRetest(key string, probed store.Entry, v verdict.Verdict) 
 		case verdict.Blocked, verdict.Suspect: // already listed: timeout-only still keeps the entry alive
 			engine := cur.Engine
 			if engine == "" {
-				engine = d.engines[0].Name
+				engine = d.eng()[0].Name
 			}
 			switched := !strings.HasPrefix(v.Engines[engine], "ok") // its engine stopped working: move to one that does
 			cur.OK, cur.Checked = 0, now

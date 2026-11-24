@@ -40,6 +40,7 @@ let tray = [];
 let paused = false;
 let st = "";
 let busy = false;
+let canStart = false; // this window can start the service (the tray app, or an installed service)
 let query = "";
 let logEntries = [];
 let listEntries = null; // null: no list for this network yet
@@ -71,7 +72,14 @@ async function loadStatus() {
     $("detail").hidden = true;
     $("toggle").hidden = true;
     $("down").hidden = false;
-    $("downerr").textContent = e.message;
+    // Starting or installing helps only when the service is really off: not
+    // when this user may not reach it, it is busy, or this window is stale.
+    const [title, lead, startable] = unreachText(e);
+    $("downtitle").textContent = title;
+    $("downlead").textContent = lead;
+    $("downerr").textContent = e.kind === "gone" ? "" : e.message;
+    $("startsvc").hidden = !(startable && canStart);
+    $("installhint").hidden = !(startable && !canStart);
     $("body").hidden = true;
     $("updated").textContent = "";
     renderUpdate(null);
@@ -130,6 +138,7 @@ function renderUpdate(u) {
   if (!n) return;
   $("updtitle").textContent = n.title;
   $("updtext").textContent = n.text;
+  $("updtext").title = n.text; // four lines at most are shown
   $("updacts").replaceChildren(...n.acts.map((a, i) => {
     const b = el("button", (a === "install" && n.installLabel) || UPDATE_LABELS[a], i ? "" : "primary");
     b.type = "button";
@@ -146,7 +155,7 @@ async function updateAct(a) {
   }
   try {
     renderUpdate(await api("POST", "/api/update/" + a));
-    if (a === "install") msg(T("Güncelleme başladı; servis birazdan yeniden başlayacak.", "The update started; the service restarts shortly."));
+    if (a === "install") msg(T("Güncelleme başlatıldı.", "The update was started."));
   } catch (e) { msg(e.message, true); }
 }
 
@@ -338,7 +347,7 @@ pop.onclick = async (e) => {
 (async () => {
   try { tray = (await api("GET", "/api/tray")).actions || []; } catch (e) { tray = []; }
   for (const b of pop.querySelectorAll("[data-tray]")) b.hidden = !tray.includes(b.dataset.act);
-  const canStart = tray.includes("start-service");
+  canStart = tray.includes("start-service");
   $("startsvc").hidden = !canStart;
   $("installhint").hidden = canStart;
   $("installtext").textContent = WIN ? T("Kurmak için yönetici terminalinde:", "To install, in an administrator terminal:") : T("Kurmak için Terminal'de:", "To install, in Terminal:");

@@ -47,8 +47,13 @@ func TestUpdateCheckAndSkip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m["latest"] != "99.0.0" || m["url"] != "https://github.com/x/releases/v99.0.0" || m["auto"] != true {
+	if m["latest"] != "99.0.0" || m["url"] != "https://github.com/x/releases/v99.0.0" {
 		t.Fatalf("check: %v", m)
+	}
+	// Nothing installs by itself any more, and the status does not say it
+	// would: an app that still reads "auto" finds it absent, which is false.
+	if _, has := m["auto"]; has {
+		t.Fatalf("the status still has \"auto\": %v", m)
 	}
 	// Run by hand, not by a service manager: it can only announce.
 	if m["supported"] != false {
@@ -77,12 +82,13 @@ func TestUpdateSettingsAreReadAfresh(t *testing.T) {
 	d, _ := rig(t, Options{})
 	d.p.Config = filepath.Join(d.p.Support, "config.json")
 	u := newUpdater(d)
-	if auto, hours := u.settings(); !auto || hours != 24 {
-		t.Fatalf("defaults: auto %v, hours %d", auto, hours)
+	if hours := u.settings(); hours != 24 {
+		t.Fatalf("defaults: hours %d", hours)
 	}
-	os.WriteFile(d.p.Config, []byte(`{"auto_update": false, "update_check_hours": 0}`), 0o644)
-	if auto, hours := u.settings(); auto || hours != 0 {
-		t.Fatalf("after the page saved: auto %v, hours %d", auto, hours)
+	// "auto_update" is 0.1.1's key: a file that has it loads, and it is ignored.
+	os.WriteFile(d.p.Config, []byte(`{"auto_update": true, "update_check_hours": 0}`), 0o644)
+	if hours := u.settings(); hours != 0 {
+		t.Fatalf("after the page saved: hours %d", hours)
 	}
 }
 

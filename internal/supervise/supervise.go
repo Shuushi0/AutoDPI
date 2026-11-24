@@ -54,6 +54,12 @@ type Proc struct {
 // (the process is then killed outright).
 func (p *Proc) Stop(grace time.Duration) { p.stop(grace) }
 
+// What Keep logs about the process's life, for a handler that listens for it.
+const (
+	MsgExited      = "exited"
+	MsgStartFailed = "start failed"
+)
+
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func logLines(r io.Reader, log *slog.Logger, name string) {
@@ -95,7 +101,7 @@ func Keep(ctx context.Context, s Spec, onUp func(*Proc)) {
 	for ctx.Err() == nil {
 		p, err := Start(s)
 		if err != nil {
-			s.Log.Error("start failed", "proc", s.Name, "err", err)
+			s.Log.Error(MsgStartFailed, "proc", s.Name, "err", err)
 		} else {
 			started := time.Now()
 			if onUp != nil {
@@ -103,7 +109,7 @@ func Keep(ctx context.Context, s Spec, onUp func(*Proc)) {
 			}
 			select {
 			case <-p.Done():
-				s.Log.Warn("exited", "proc", s.Name, "err", p.Err(), "after", time.Since(started).Round(time.Millisecond))
+				s.Log.Warn(MsgExited, "proc", s.Name, "err", p.Err(), "after", time.Since(started).Round(time.Millisecond))
 			case <-ctx.Done():
 				p.Stop(5 * time.Second)
 				return

@@ -21,12 +21,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,6 +50,29 @@ const (
 
 // ErrNotModified is Check's answer when the list has not changed since etag.
 var ErrNotModified = errors.New("release list not modified")
+
+// ErrVerify marks a download that arrived and is not what the release key
+// signed: asking again gets the same bytes, unlike a connection that broke.
+var ErrVerify = errors.New("the download does not match the release's signature")
+
+// stallMax is how long a download may go without a single byte arriving. A
+// slow line is waited for as long as it keeps delivering; a variable so that
+// tests need not wait.
+var stallMax = 60 * time.Second
+
+// HTTPSOnly is a CheckRedirect that refuses to leave https: the release list
+// and the files come from https addresses, and a redirect to plain http would
+// hand the request to whoever sits on the line. (The archive would still fail
+// its signature; the list and the notes have none.)
+func HTTPSOnly(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("refused a redirect from https to %s", req.URL.Scheme)
+	}
+	return nil
+}
 
 type Asset struct {
 	Name string `json:"name"`
@@ -135,7 +160,7 @@ func pick(list []ghRelease, current, prefix string) *Release {
 		if r.Draft || !Valid(v) || Compare(v, current) <= 0 || (best != nil && Compare(v, best.Version) <= 0) {
 			continue
 		}
-		rel := &Release{Version: v, URL: r.URL, Notes: r.Body, Published: r.Published}
+		rel := &Release{Version: v, URL: pageURL(r.URL, r.Tag), Notes: r.Body, Published: r.Published}
 		for _, a := range r.Assets {
 			as := Asset{Name: a.Name, URL: a.URL, Size: a.Size}
 			switch a.Name {
@@ -154,26 +179,55 @@ func pick(list []ghRelease, current, prefix string) *Release {
 	return best
 }
 
-// Valid reports whether v is MAJOR.MINOR.PATCH with an optional -suffix.
+// pageURL is the release page the apps open in the browser: the one GitHub
+// names when it is an https address on github.com, and otherwise the page of
+// tag in Repo. The address goes to ShellExecute and window.open, which would
+// run a file path or a script URL just as readily.
+func pageURL(raw, tag string) string {
+	if u, err := url.Parse(raw); err == nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil {
+		return u.String()
+	}
+	return "https://github.com/" + Repo + "/releases/tag/" + tag
+}
+
+// Valid reports whether v is MAJOR.MINOR.PATCH with an optional -suffix: plain
+// digits without leading zeros, and a suffix of letters, digits, dots and
+// hyphens. One version has one spelling, and none holds a character that
+// means something in a file name or a URL.
 func Valid(v string) bool {
 	_, _, ok := parse(v)
 	return ok
 }
 
 func parse(v string) (nums [3]int, pre string, ok bool) {
-	v, pre, _ = strings.Cut(v, "-")
+	v, pre, dash := strings.Cut(v, "-")
+	if dash && !validSuffix(pre) {
+		return nums, "", false
+	}
 	parts := strings.Split(v, ".")
 	if len(parts) != 3 {
 		return nums, "", false
 	}
 	for i, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 0 || p == "" || (len(p) > 1 && p[0] == '0') {
+		if p == "" || len(p) > 9 || (len(p) > 1 && p[0] == '0') || strings.Trim(p, "0123456789") != "" {
 			return nums, "", false
 		}
-		nums[i] = n
+		nums[i], _ = strconv.Atoi(p)
 	}
 	return nums, pre, true
+}
+
+func validSuffix(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // Compare orders two versions: -1, 0 or 1. A version with a -suffix comes
@@ -205,10 +259,55 @@ func Compare(a, b string) int {
 		return 1
 	case pb == "":
 		return -1
-	case pa < pb:
+	}
+	return natural(pa, pb)
+}
+
+// natural orders two suffixes with their runs of digits read as numbers:
+// rc9 before rc10, beta.2 before beta.11. As plain text "rc10" came before
+// "rc9", and the tenth candidate would never have been offered to anyone on
+// the ninth.
+func natural(a, b string) int {
+	for a != "" && b != "" {
+		da, db := digits(a), digits(b)
+		if da > 0 && db > 0 {
+			na, nb := strings.TrimLeft(a[:da], "0"), strings.TrimLeft(b[:db], "0")
+			if len(na) != len(nb) {
+				if len(na) < len(nb) {
+					return -1
+				}
+				return 1
+			}
+			if c := strings.Compare(na, nb); c != 0 {
+				return c
+			}
+			a, b = a[da:], b[db:]
+			continue
+		}
+		if a[0] != b[0] {
+			if a[0] < b[0] {
+				return -1
+			}
+			return 1
+		}
+		a, b = a[1:], b[1:]
+	}
+	switch {
+	case a == "" && b == "":
+		return 0
+	case a == "":
 		return -1
 	}
 	return 1
+}
+
+// digits is the length of the run of digits s starts with.
+func digits(s string) int {
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		n++
+	}
+	return n
 }
 
 // Staged is a verified release unpacked in Dir: the autodpi binary at its
@@ -235,11 +334,11 @@ func Fetch(ctx context.Context, c *http.Client, rel *Release, dir string) (Stage
 		return Staged{}, err
 	}
 	if err := Verify(sums, sig, PublicKey); err != nil {
-		return Staged{}, err
+		return Staged{}, fmt.Errorf("%w: %v", ErrVerify, err)
 	}
 	want, err := sumFor(sums, rel.Archive.Name)
 	if err != nil {
-		return Staged{}, err
+		return Staged{}, fmt.Errorf("%w: %v", ErrVerify, err)
 	}
 	zipPath := filepath.Join(dir, rel.Archive.Name)
 	if err := download(ctx, c, rel.Archive.URL, zipPath, want); err != nil {
@@ -319,8 +418,19 @@ func sumFor(sums []byte, name string) ([]byte, error) {
 }
 
 func download(ctx context.Context, c *http.Client, url, dst string, want []byte) error {
+	// No limit on the whole download, only on standing still: a limit of ten
+	// minutes could never be met on a slow line, and the same megabytes were
+	// fetched again every hour.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	stall := time.AfterFunc(stallMax, func() { stalled.Store(true); cancel() })
+	defer stall.Stop()
 	resp, err := open(ctx, c, url)
 	if err != nil {
+		if stalled.Load() {
+			err = fmt.Errorf("%s: no answer for %s", path.Base(url), stallMax)
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -329,20 +439,38 @@ func download(ctx context.Context, c *http.Client, url, dst string, want []byte)
 		return err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, maxArchive+1))
+	body := progress{resp.Body, func() { stall.Reset(stallMax) }}
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(body, maxArchive+1))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
+		if stalled.Load() {
+			err = fmt.Errorf("%s: the download stood still for %s", filepath.Base(dst), stallMax)
+		}
 		return err
 	}
 	if n > maxArchive {
-		return fmt.Errorf("%s: larger than %d bytes", filepath.Base(dst), int64(maxArchive))
+		return fmt.Errorf("%w: %s is larger than %d bytes", ErrVerify, filepath.Base(dst), int64(maxArchive))
 	}
 	if got := h.Sum(nil); string(got) != string(want) {
-		return fmt.Errorf("%s: SHA-256 does not match SHA256SUMS", filepath.Base(dst))
+		return fmt.Errorf("%w: the SHA-256 of %s is not the one in SHA256SUMS", ErrVerify, filepath.Base(dst))
 	}
 	return nil
+}
+
+// progress calls moved whenever bytes arrive.
+type progress struct {
+	io.Reader
+	moved func()
+}
+
+func (p progress) Read(b []byte) (int, error) {
+	n, err := p.Reader.Read(b)
+	if n > 0 {
+		p.moved()
+	}
+	return n, err
 }
 
 // unzip extracts the archive's top folder root into dst: regular files and

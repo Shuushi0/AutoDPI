@@ -70,7 +70,7 @@ func parseNetstat(text string, names map[uint32]string) []Listener {
 			continue
 		}
 		host, port, err := net.SplitHostPort(f[1])
-		if err != nil || port != "53" {
+		if err != nil || port != "53" || host == "" {
 			continue
 		}
 		if strings.HasPrefix(proto, "TCP") {

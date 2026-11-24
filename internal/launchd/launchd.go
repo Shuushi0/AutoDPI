@@ -10,13 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
+	"github.com/Shuushi0/AutoDPI/internal/fsx"
 	"github.com/Shuushi0/AutoDPI/internal/i18n"
 	"github.com/Shuushi0/AutoDPI/internal/paths"
 	"github.com/Shuushi0/AutoDPI/internal/sysdns"
+	"github.com/Shuushi0/AutoDPI/internal/update"
 )
 
 // xmlText escapes s for the text of a plist <string>: only & < > need it.
@@ -44,6 +48,8 @@ var plistTmpl = template.Must(template.New("plist").Funcs(template.FuncMap{"xml"
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>20</integer>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardErrorPath</key>
@@ -86,7 +92,30 @@ func launchctl(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// Refresh writes the job's property list again when it is not what this
+// version would write. A copy that updated itself never runs Install, so a
+// change to the list (ExitTimeOut) would otherwise never reach it. launchd
+// reads the file when it loads the job: this takes effect at the next boot.
+func Refresh(p paths.Set) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	want, err := Render(p.Installed)
+	if err != nil {
+		return
+	}
+	if have, err := os.ReadFile(paths.Plist); err != nil || bytes.Equal(have, want) {
+		return // not installed as a job, or already the same
+	}
+	_ = writeRoot(paths.Plist, want, 0o644)
+}
+
 // Render returns the launchd property list for the installed binary.
+//
+// ExitTimeOut: launchd's default is 5 seconds between SIGTERM and SIGKILL,
+// which a stop that has to wait for a helper does not always make (measured:
+// 9.7 s with a frozen guard); killed there, the resolver was not given back
+// until the next start. The daemon's own limit (shutdownMax) is below it.
 func Render(binary string) ([]byte, error) {
 	var b bytes.Buffer
 	err := plistTmpl.Execute(&b, map[string]string{
@@ -111,9 +140,22 @@ func Install(p paths.Set, self string) error {
 	if err := os.Chmod(p.Support, 0o755); err != nil {
 		return err
 	}
+	// The running service goes first, and is waited for until its process
+	// has ended. It used to be replaced under its own feet: an update it was
+	// in the middle of could then land on the copy being installed, and at
+	// its shutdown it wrote its update record back after this had cleared it.
+	stopJob()
 	if err := copyExec(self, p.Installed); err != nil {
+		// The version that was there, running again, not a stopped service.
+		if _, serr := os.Stat(paths.Plist); serr == nil {
+			_, _ = launchctl("bootstrap", "system", paths.Plist)
+		}
 		return fmt.Errorf(i18n.T("autodpi kurulum klasörüne kopyalanamadı: %w", "install binary: %w"), err)
 	}
+	// Whoever installs by hand has decided which version runs: an update
+	// still waiting to be confirmed must not take it back later. The daemon
+	// is down here, so nothing else is writing the record.
+	update.Forget(p)
 
 	plist, err := Render(p.Installed)
 	if err != nil {
@@ -132,12 +174,27 @@ func Install(p paths.Set, self string) error {
 		}
 	}
 
-	_, _ = launchctl("bootout", target())      // replace a running instance
-	for i := 0; i < 50 && Print() != ""; i++ { // bootout returns before the job is gone
-		time.Sleep(200 * time.Millisecond)
+	// bootstrap fails with "Input/output error" while launchd is still
+	// letting go of the old job, which stopJob's wait does not always see.
+	// Without the service loaded nothing would start it again, not even a
+	// reboot: tried a few times before giving up. Only bootstrap's own
+	// success counts along the way (a job still listed may be the old one
+	// on its way out); after the last try, a job that is loaded is enough.
+	var out string
+	var berr error
+	for i := 0; i < 5; i++ {
+		if out, berr = launchctl("bootstrap", "system", paths.Plist); berr == nil {
+			break
+		}
+		time.Sleep(time.Second)
 	}
-	if out, err := launchctl("bootstrap", "system", paths.Plist); err != nil {
-		return fmt.Errorf(i18n.T("launchctl bootstrap başarısız: %v: %s", "launchctl bootstrap: %v: %s"), err, out)
+	if berr != nil && Print() != "" {
+		berr = nil
+	}
+	if berr != nil {
+		err, out := berr, out
+		return fmt.Errorf(i18n.T("servis launchd'ye yüklenemedi (%v: %s). Dosyalar yerinde; aynı komutu yeniden çalıştırın, olmazsa bilgisayarı yeniden başlatıp bir daha deneyin",
+			"the service could not be loaded into launchd (%v: %s). The files are in place; run the same command again, and if that fails restart the computer and try once more"), err, out)
 	}
 	_, _ = launchctl("enable", target())
 	// RunAtLoad already started it; kickstart without -k only starts a job
@@ -155,7 +212,10 @@ func Uninstall(p paths.Set, purge bool) error {
 	if os.Geteuid() != 0 {
 		return ErrNotRoot
 	}
-	_, _ = launchctl("bootout", target())
+	stopJob()
+	// An update waiting to be confirmed ends here, with the copies it kept:
+	// its record would otherwise meet the next install.
+	update.Forget(p)
 	// The daemon restores the resolver when it stops; this covers one that
 	// died holding it.
 	_ = (&sysdns.Manager{File: p.DNSSaved}).Release()
@@ -171,6 +231,42 @@ func Uninstall(p paths.Set, purge bool) error {
 	_ = os.RemoveAll(p.Bin)
 	_ = os.RemoveAll(p.Run)
 	return nil
+}
+
+// stopJob unloads the job and waits until launchd no longer lists it and its
+// process has ended. bootout returns before either; the daemon gives the
+// network back and saves its state on the way out, which takes seconds and,
+// when something hangs, up to its own limit of a minute. One that is still
+// there after that is ended.
+func stopJob() {
+	pid := jobPID(Print())
+	_, _ = launchctl("bootout", target())
+	for i := 0; i < 50 && Print() != ""; i++ {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if pid <= 1 {
+		return
+	}
+	for i := 0; i < 350; i++ { // 70 s
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	time.Sleep(500 * time.Millisecond)
+}
+
+// jobPID picks the job's process id out of `launchctl print`: the "pid ="
+// line indented by exactly one tab. 0 when the job is not running.
+func jobPID(print string) int {
+	for _, ln := range strings.Split(print, "\n") {
+		if v, ok := strings.CutPrefix(ln, "\tpid ="); ok {
+			n, _ := strconv.Atoi(strings.TrimSpace(v))
+			return n
+		}
+	}
+	return 0
 }
 
 // Print returns launchctl's view of the job, "" when it is not loaded.
@@ -201,19 +297,36 @@ func copyExec(src, dst string) error {
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	// To disk before the rename: after a power cut the rename can be there
+	// and the content not, and launchd would be starting an empty file.
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if err := out.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Chown(tmp, 0, 0); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	fsx.SyncDir(filepath.Dir(dst))
+	return nil
 }
 
+// writeRoot replaces path in one step: a half-written plist is a service
+// launchd refuses to load at the next boot.
 func writeRoot(path string, b []byte, mode os.FileMode) error {
-	if err := os.WriteFile(path, b, mode); err != nil {
+	if err := fsx.WriteFile(path, b, mode); err != nil {
 		return err
 	}
 	if err := os.Chown(path, 0, 0); err != nil {

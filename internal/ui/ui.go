@@ -84,7 +84,7 @@ func (s *Server) Listen() (net.Listener, string, error) {
 
 // Serve runs the HTTP server on ln until it is closed.
 func (s *Server) Serve(ln net.Listener) error {
-	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 4 * time.Minute}
+	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Minute} // a save waits for the administrator prompt, which has no limit of its own: cut off earlier, a save that went through showed as "not saved"
 	err := srv.Serve(ln)
 	if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
 		return nil

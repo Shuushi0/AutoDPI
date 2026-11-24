@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Shuushi0/AutoDPI/internal/domain"
+	"github.com/Shuushi0/AutoDPI/internal/fsx"
 )
 
 // version 2 dropped the seed list, the per-entry "verified" flag and the
@@ -130,18 +131,20 @@ func Open(path string) (*Store, error) {
 			}
 		}
 	}
-	s.mig.From, s.mig.Backup = max(old, 1), path+".v1"
-	if err := writeFile(s.mig.Backup, b); err != nil {
-		return nil, fmt.Errorf("back up the old state file: %w", err)
-	}
+	// A folder that cannot be written (a full disk, a volume gone read-only)
+	// must not keep the service from starting: the lists are used from
+	// memory, the old file stays as it is, and the next change tries the
+	// write again.
+	s.mig.From = max(old, 1)
 	d.Version = version
 	s.d = d
-	s.mu.Lock()
-	err = s.saveLocked()
-	s.mu.Unlock()
-	if err != nil {
-		return nil, err
+	if err := writeFile(path+".v1", b); err != nil {
+		return s, nil
 	}
+	s.mig.Backup = path + ".v1"
+	s.mu.Lock()
+	_ = s.saveLocked()
+	s.mu.Unlock()
 	return s, nil
 }
 
@@ -212,10 +215,20 @@ func writeFile(path string, b []byte) error {
 		tmp.Close()
 		return err
 	}
+	// To disk before the rename: after a power cut the rename can be there
+	// and the content not, and an empty state file is every learned list gone.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := fsx.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	fsx.SyncDir(dir)
+	return nil
 }
 
 func (s *Store) Paused() bool {

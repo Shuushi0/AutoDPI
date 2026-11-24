@@ -650,7 +650,9 @@ func TestArea1_BulkIntegrity(t *testing.T) {
 			return
 		}
 		c.Write(rec(0x16, []byte{2, 0, 0, 0}))
+		sent := make(chan struct{})
 		go func() {
+			defer close(sent)
 			b := make([]byte, 1<<16)
 			for i := range b {
 				b[i] = byte(i * 7)
@@ -661,6 +663,10 @@ func TestArea1_BulkIntegrity(t *testing.T) {
 			c.(*net.TCPConn).CloseWrite()
 		}()
 		n, _ := io.Copy(io.Discard, c)
+		// The connection is closed when this returns. With the upload done
+		// first that used to cut the download short, which looked like the
+		// observer losing data.
+		<-sent
 		srvGot <- n
 	})
 	for _, clean := range []bool{false, true} {

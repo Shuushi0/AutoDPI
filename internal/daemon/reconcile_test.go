@@ -299,7 +299,7 @@ func TestCaptureNeverUpBacksOff(t *testing.T) {
 			t.Fatalf("release %d: retry in %v, want %v", i+1, got, want)
 		}
 		pass(t, d)
-		wantState(t, d, StateStandby, "next attempt in")
+		wantState(t, d, StateError, "30s", "next attempt in") // still an error while it waits
 		if n := f.get().starts; n != i+1 {
 			t.Fatalf("started %d times inside the backoff window, want %d", n, i+1)
 		}
@@ -566,5 +566,350 @@ func TestConflictingToolKeepsStandby(t *testing.T) {
 	pass(t, d)
 	if !d.running() || f.get().starts != 2 || d.failOpens != 0 {
 		t.Fatalf("did not re-engage at once when the tool closed (failOpens=%d)", d.failOpens)
+	}
+}
+
+// A sing-box that keeps exiting as soon as it is started is this build, its
+// configuration or this machine being broken. The state says so, with
+// sing-box's own last words, and keeps saying so while the next attempt waits:
+// "starting" or "standby" would read as if everything were in order.
+func TestSingBoxThatKeepsExitingIsAnError(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	pass(t, d)
+	wantState(t, d, StateStarting)
+
+	// Three exits within the first seconds: still the time in which an adapter
+	// or a firewall that is not ready right after boot or wake sorts itself
+	// out, as it did before any of this was reported.
+	for range brokenExits {
+		d.setPID(4242)
+		d.sbPrinted("\x1b[31mFATAL\x1b[0m[0000] decode config at /x/config.json: inbounds[0]: unknown inbound type: tun")
+		d.sbExited("exit status 1")
+	}
+	pass(t, d)
+	wantState(t, d, StateStarting)
+	if !d.running() {
+		t.Fatal("released within the first seconds")
+	}
+
+	// Fewer exits, however long it has been, are not enough either.
+	d.mu.Lock()
+	d.sbExits = brokenExits - 1
+	d.mu.Unlock()
+	d.sbStarted = time.Now().Add(-brokenAfter - time.Second)
+	pass(t, d)
+	wantState(t, d, StateStarting)
+
+	d.sbExited("exit status 1")
+	pass(t, d)
+	wantState(t, d, StateError, "sing-box does not start", "unknown inbound type: tun", "retry in")
+	if _, det := state(d); strings.Contains(det, "\x1b") || strings.Contains(det, "FATAL[") {
+		t.Fatalf("sing-box's colors and prefix reached the status line: %q", det)
+	}
+	if d.running() {
+		t.Fatal("a sing-box that cannot start was kept")
+	}
+	pass(t, d)
+	wantState(t, d, StateError, "sing-box does not start", "unknown inbound type: tun", "next attempt in")
+	if n := f.get().starts; n != 1 {
+		t.Fatalf("started %d times inside the backoff window, want 1", n)
+	}
+
+	// The next attempt starts from a clean slate, and with a sing-box that
+	// stays up it engages as usual.
+	d.retryAt = time.Now().Add(-time.Second)
+	f.set(func(f *fakeSys) { f.tun = true })
+	pass(t, d)
+	pass(t, d)
+	wantState(t, d, StateActive)
+	if why := d.singBoxBroken(); why != "" {
+		t.Fatalf("still called broken after engaging: %q", why)
+	}
+}
+
+// broken makes the current capture's sing-box one that has kept exiting for
+// long enough, with these last words.
+func broken(d *Daemon, lines ...string) {
+	for i := range brokenExits {
+		d.setPID(4242 + i)
+		for _, l := range lines {
+			d.sbPrinted(l)
+		}
+		d.sbExited("exit status 2")
+	}
+	d.sbStarted = time.Now().Add(-brokenAfter - time.Second)
+}
+
+// Without a word from sing-box the exit error is the reason.
+func TestSingBoxExitWithoutOutput(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	pass(t, d)
+	broken(d)
+	d.mu.Lock()
+	d.sbLastLine = ""
+	d.mu.Unlock()
+	d.sbExited("exit status 0xc0000135")
+	pass(t, d)
+	wantState(t, d, StateError, "sing-box does not start", "0xc0000135")
+}
+
+// After a crash the last line is the tail of a stack trace. What is shown is
+// the line that says why.
+func TestACrashIsReportedByItsPanicLine(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	pass(t, d)
+	broken(d, "panic: runtime error: invalid memory address or nil pointer dereference",
+		"goroutine 1 [running]:", "github.com/sagernet/sing-tun.(*NativeTun).Start(0x0)",
+		"\t/go/pkg/mod/github.com/sagernet/sing-tun@v0.9.7/tun_windows.go:123 +0x1c")
+	pass(t, d)
+	wantState(t, d, StateError, "sing-box does not start", "panic: runtime error")
+	if _, det := state(d); strings.Contains(det, "tun_windows.go") {
+		t.Fatalf("the stack trace's tail is what the status shows: %q", det)
+	}
+}
+
+// The words of an earlier try do not stand for a later one that failed
+// another way and said nothing.
+func TestLastWordsBelongToTheLastProcess(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	pass(t, d)
+	broken(d, "FATAL[0000] start service: something that happened once")
+	d.setPID(5000)
+	d.sbExited("fork/exec: permission denied")
+	pass(t, d)
+	wantState(t, d, StateError, "sing-box does not start", "permission denied")
+}
+
+// The wait before the next round does not grow without end for this cause,
+// and pausing and resuming is a way to try again at once.
+func TestBrokenSingBoxWaitsAreBoundedAndPauseClearsThem(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	for round := 0; round < 8; round++ {
+		d.retryAt = time.Time{}
+		pass(t, d)
+		broken(d, "FATAL[0000] start service: configure tun interface: Access is denied.")
+		pass(t, d)
+		wantState(t, d, StateError, "sing-box does not start")
+		if wait := time.Until(d.retryAt); wait > brokenRetryMax+time.Second {
+			t.Fatalf("round %d: next attempt in %v, more than %v", round+1, wait.Round(time.Second), brokenRetryMax)
+		}
+	}
+	if err := d.st.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	pass(t, d)
+	wantState(t, d, StatePaused)
+	_ = d.st.SetPaused(false)
+	f.set(func(f *fakeSys) { f.tun = true })
+	pass(t, d)
+	if !d.running() {
+		s, det := state(d)
+		t.Fatalf("resume did not try again at once: %s (%s)", s, det)
+	}
+}
+
+// Once the capture has worked, exits are the watch's business: a crash after
+// hours of running must not be reported as a sing-box that cannot start.
+func TestExitsAfterVerificationAreNotABrokenBuild(t *testing.T) {
+	d, f := rig(t, Options{})
+	engage(t, d, f)
+	broken(d, "signal: killed")
+	pass(t, d)
+	if s, det := state(d); s == StateError && strings.Contains(det, "does not start") {
+		t.Fatalf("a verified capture was called a sing-box that does not start: %s", det)
+	}
+}
+
+// The tap hears the supervisor's own records about sing-box.
+func TestHelperTapCountsExitsAndKeepsLastWords(t *testing.T) {
+	d, _ := rig(t, Options{})
+	log := slog.New(helperTap{quietLog().Handler(), d})
+	log.Info("FATAL[0000] start service: configure tun interface: Access is denied.", "proc", "sing-box")
+	log.Warn(supervise.MsgExited, "proc", "sing-box", "err", errors.New("exit status 1"), "after", time.Second)
+	log.Error(supervise.MsgStartFailed, "proc", "sing-box", "err", errors.New("fork/exec: operation not permitted"))
+	d.mu.Lock()
+	exits, last, fatal := d.sbExits, d.sbLastLine, d.sbFatal
+	d.mu.Unlock()
+	if exits != 2 || last != "start service: configure tun interface: Access is denied." || fatal != last {
+		t.Fatalf("exits=%d last=%q fatal=%q", exits, last, fatal)
+	}
+}
+
+// Three tries fail while the adapter is not ready right after boot, the fourth
+// stays up and is still being verified when the ten seconds are over. That
+// one works: it must not be killed for what the first three did, however
+// short a time it has been up when the pass comes round.
+func TestASingBoxThatHealedIsNotKilledForEarlierExits(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.capErr = errors.New("TLS through the capture: timeout") })
+	pass(t, d)
+	broken(d) // three quick exits, long enough ago
+	d.setPID(7000)
+	pass(t, d) // the fourth try has been up for a moment only
+	if s, det := state(d); s == StateError {
+		t.Fatalf("a sing-box that is running was released as broken: %s", det)
+	}
+	if !d.running() {
+		t.Fatal("the running sing-box was stopped")
+	}
+	// Once it has stayed up, the earlier exits are forgotten: one more exit
+	// later is one, not the fourth.
+	d.mu.Lock()
+	d.sbUpSince = time.Now().Add(-quickExit - time.Second)
+	d.mu.Unlock()
+	d.sbExited("exit status 1")
+	pass(t, d)
+	if s, det := state(d); s == StateError {
+		t.Fatalf("one exit after a healthy run made it broken: %s", det)
+	}
+}
+
+// What an earlier capture's sing-box said when it crashed is not the reason a
+// later one cannot even be started.
+func TestACrashLineDoesNotOutliveItsCapture(t *testing.T) {
+	d, f := rig(t, Options{})
+	f.set(func(f *fakeSys) { f.tun = false })
+	pass(t, d)
+	broken(d, "panic: runtime error: index out of range")
+	pass(t, d)
+	wantState(t, d, StateError, "panic: runtime error")
+	d.retryAt = time.Time{}
+	pass(t, d) // a new capture
+	for range brokenExits {
+		d.sbExited("fork/exec sing-box: no such file or directory") // could not be started: no process, no words
+	}
+	d.sbStarted = time.Now().Add(-brokenAfter - time.Second)
+	pass(t, d)
+	wantState(t, d, StateError, "no such file")
+}
+
+// While paused with a restore that keeps failing, networksetup is not run at
+// every pass.
+func TestAPausedFailingRestoreDoesNotHammer(t *testing.T) {
+	d, f := rig(t, Options{})
+	engage(t, d, f)
+	f.set(func(f *fakeSys) { f.setErr = errors.New("networksetup: Unable to commit changes to network database") })
+	if err := d.st.SetPaused(true); err != nil {
+		t.Fatal(err)
+	}
+	pass(t, d)
+	wantState(t, d, StatePaused)
+	pass(t, d) // one more try, which sets the wait
+	calls := f.get().dnsCalls
+	for range 5 {
+		pass(t, d)
+	}
+	if got := f.get().dnsCalls - calls; got != 0 {
+		t.Fatalf("%d networksetup calls in five paused passes inside the retry wait", got)
+	}
+	f.set(func(f *fakeSys) { f.setErr = nil })
+	d.dnsRetry = time.Time{}
+	pass(t, d)
+	if d.dns.Holding() {
+		t.Fatal("the resolver was not given back once networksetup worked again")
+	}
+}
+
+// With DNS takeover turned off there is no manager to take with, but what an
+// earlier run took and could not give back is still given back, and tried
+// again when that fails at start.
+func TestAHoldFromAnEarlierRunIsGivenBackWithTakeoverOff(t *testing.T) {
+	d, f := rig(t, Options{})
+	engage(t, d, f)
+	old := d.dns
+	d.stopSingBoxKeepingDNSForTest()
+	d.dns, d.dnsOld = nil, old // as Run sets them when dns_takeover is off
+	if !old.Holding() {
+		t.Fatal("the rig did not leave a hold behind")
+	}
+	f.set(func(f *fakeSys) { f.net.Online = false }) // no new capture in this test
+	pass(t, d)
+	if old.Holding() || !slices.Equal(f.get().dns["Wi-Fi"], []string{"192.168.1.1"}) {
+		t.Fatalf("the earlier run's hold is still there: %v", f.get().dns)
+	}
+}
+
+// A long error keeps its end, which is where the cause is: the tray tooltip
+// and the two-line detail in the apps cut the end off.
+func TestBriefReasonKeepsTheCause(t *testing.T) {
+	for in, want := range map[string]string{
+		`decode config at C:\ProgramData\AutoDPI\run\config.json: inbounds[0]: unknown inbound type: tun and something long enough to pass ninety`: "inbounds[0]: unknown inbound type: tun and something long enough to pass ninety",
+		"start service: configure tun interface: Access is denied.":                                                                                "start service: configure tun interface: Access is denied.",
+		"short": "short",
+	} {
+		if got := briefReason(in); got != want {
+			t.Errorf("briefReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := briefReason(strings.Repeat("x", 300)); len([]rune(got)) > 90 {
+		t.Errorf("a long line without a colon is %d characters", len([]rune(got)))
+	}
+}
+
+// The default route goes away and stays away while the capture is up (a
+// network that only has IPv6 left, say). The capture held DNS at an address
+// that can no longer be reached, and with every check skipped while offline it
+// stayed "active" for good. A blip is waited out; a minute is not.
+func TestACaptureThatStaysOfflineIsReleased(t *testing.T) {
+	d, f := rig(t, Options{})
+	engage(t, d, f)
+	f.set(func(f *fakeSys) { f.net.Online = false })
+	pass(t, d)
+	if !d.running() || !d.dns.Holding() {
+		t.Fatal("released at the first pass without a route: a blip must be waited out")
+	}
+	d.offlineSince = time.Now().Add(-offlineRelease - time.Second)
+	pass(t, d)
+	wantState(t, d, StateOffline)
+	if d.running() || d.dns.Holding() || !slices.Equal(f.get().dns["Wi-Fi"], []string{"192.168.1.1"}) {
+		t.Fatalf("still held after a minute offline: running=%v holding=%v dns=%v", d.running(), d.dns.Holding(), f.get().dns)
+	}
+	f.set(func(f *fakeSys) { f.net.Online = true })
+	pass(t, d)
+	if !d.running() {
+		t.Fatal("did not engage again once the route was back")
+	}
+}
+
+// networksetup fails at times. When that happens as the capture is released,
+// the system is left asking 1.1.1.1 in the clear with no capture behind it,
+// and nothing tried again until the next successful engage and release.
+func TestAFailedRestoreIsTriedAgainWhileWaiting(t *testing.T) {
+	d, f := rig(t, Options{})
+	engage(t, d, f)
+	f.set(func(f *fakeSys) { f.setErr = errors.New("networksetup: Unable to commit changes to network database") })
+	d.release("fail-open: checks failing for 1m30s: DoH: timeout", StateStandby)
+	if !slices.Equal(f.get().dns["Wi-Fi"], []string{sysdns.Capture}) || !d.dns.Holding() {
+		t.Fatalf("the fake restore did not fail: %v", f.get().dns)
+	}
+	pass(t, d) // still failing: nothing changes, and it does not hammer
+	calls := f.get().dnsCalls
+	pass(t, d)
+	if got := f.get().dnsCalls; got != calls {
+		t.Fatalf("%d more networksetup calls within the retry wait", got-calls)
+	}
+	f.set(func(f *fakeSys) { f.setErr = nil })
+	d.dnsRetry = time.Time{}
+	pass(t, d)
+	if d.dns.Holding() || !slices.Equal(f.get().dns["Wi-Fi"], []string{"192.168.1.1"}) {
+		t.Fatalf("the resolver was not given back while waiting: %v", f.get().dns)
+	}
+	wantState(t, d, StateStandby)
+}
+
+// stopSingBoxKeepingDNSForTest stops the capture as a crash would: the
+// resolver stays ours and the record stays on disk.
+func (d *Daemon) stopSingBoxKeepingDNSForTest() {
+	d.mu.Lock()
+	stop := d.sbStop
+	d.sbStop = nil
+	d.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
 }

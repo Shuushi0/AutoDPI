@@ -9,7 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -28,11 +30,13 @@ import (
 	"github.com/Shuushi0/AutoDPI/internal/lab"
 	"github.com/Shuushi0/AutoDPI/internal/logx"
 	"github.com/Shuushi0/AutoDPI/internal/paths"
+	"github.com/Shuushi0/AutoDPI/internal/selfcheck"
 	"github.com/Shuushi0/AutoDPI/internal/service"
 	"github.com/Shuushi0/AutoDPI/internal/store"
 	"github.com/Shuushi0/AutoDPI/internal/supervise"
 	"github.com/Shuushi0/AutoDPI/internal/sysx"
 	"github.com/Shuushi0/AutoDPI/internal/ui"
+	"github.com/Shuushi0/AutoDPI/internal/update"
 )
 
 const usageTR = `autodpi — yerel, şeffaf DPI-bypass servisi
@@ -59,6 +63,7 @@ Kullanım:
 
 Tanı:
   autodpi doctor                   ön kontroller
+  autodpi selftest                 bu kopyanın yardımcı programları bu makinede çalışıyor mu (ağa dokunmaz)
   autodpi ui [--no-open]           tarayıcıda ayar ve durum sayfası
   autodpi lab [host...]            hangi teknik bu ağda hangi hedefi açıyor (root gerekmez, VPN kapalı olmalı)
   autodpi version
@@ -90,6 +95,7 @@ Use:
 
 Diagnostics:
   autodpi doctor                   pre-flight checks
+  autodpi selftest                 do this copy's helper programs work on this machine (touches no network)
   autodpi ui [--no-open]           settings and status page in the browser
   autodpi lab [host...]            which technique opens which target on this network (no root, VPN must be off)
   autodpi version
@@ -136,6 +142,8 @@ func main() {
 		logCmd(args)
 	case "doctor":
 		runDoctor()
+	case "selftest":
+		selfTest()
 	case "lab":
 		runLab(args)
 	case "ui":
@@ -275,6 +283,18 @@ func runDaemon(args []string) {
 	for _, w := range cfg.Warnings {
 		log.Warn("config", "note", w)
 	}
+	if service.Supervised() {
+		service.EnsureLoginAgent(p)
+		service.RefreshJob(p)
+	}
+	// A machine-wide SSL_CERT_FILE or SSL_CERT_DIR (set for some other
+	// program, and inherited by every service on Windows) replaces the
+	// system's certificates in sing-box: its DoH then fails with "unknown
+	// authority" and all DNS with it. The service trusts the system's
+	// certificates and nothing else.
+	for _, k := range []string{"SSL_CERT_FILE", "SSL_CERT_DIR"} {
+		_ = os.Unsetenv(k)
+	}
 	daemon.TuneRuntime()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -297,11 +317,34 @@ func runDaemon(args []string) {
 
 func install(args []string) {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	downgrade := fs.Bool("downgrade", false, i18n.T("kurulu sürüm daha yeniyse de bu kopyayı kur", "install this copy even when the installed version is newer"))
 	parseFlags(fs, args)
 	if !embedded.Embedded() {
 		die(i18n.T("bu derleme yardımcı ikili dosyaları içermiyor; kurulum için scripts/build.sh ile üretilen dist/autodpi kullanın", "this build does not embed the helper binaries; install the dist/autodpi that scripts/build.sh produces"))
 	}
 	p := paths.Default()
+	// An older copy (a download folder from last month, opened again) would
+	// quietly put an old version over a newer one that updated itself.
+	if have := installedVersion(p.Installed); !*downgrade && update.Compare(have, daemon.Version) > 0 {
+		die(i18n.T("kurulu sürüm (%s) bu kopyadan (%s) daha yeni; hiçbir şey değiştirilmedi.\nEski sürümü yine de kurmak için: autodpi install --downgrade",
+			"the installed version (%s) is newer than this copy (%s); nothing was changed.\nTo install the older version anyway: autodpi install --downgrade"), have, daemon.Version)
+	}
+	// Before anything is replaced: a copy whose helpers do not work here
+	// would take a working install's place and leave nothing to go back to.
+	if sysx.IsRoot() {
+		// A minute and more when antivirus scans the helpers first: say what
+		// is going on.
+		fmt.Println(i18n.T("yardımcı programlar denetleniyor…", "checking the helper programs…"))
+		switch err := runSelfCheck(io.Discard); {
+		case errors.Is(err, selfcheck.ErrBroken):
+			die(i18n.T("hiçbir şey değiştirilmedi: %v", "nothing was changed: %v"), err)
+		case err != nil:
+			// The check itself could not be done. That says nothing against
+			// this copy, and another download would not change it.
+			die(i18n.T("yardımcı programlar denetlenemedi, hiçbir şey değiştirilmedi: %v\n(disk dolu olabilir ya da bir güvenlik programı dosyaları tutuyor olabilir; biraz sonra yeniden deneyin)",
+				"the helper programs could not be checked; nothing was changed: %v\n(the disk may be full, or a security program may be holding the files; try again in a moment)"), err)
+		}
+	}
 	if err := service.Install(p, self()); err != nil {
 		die("%v", err)
 	}
@@ -314,6 +357,26 @@ func install(args []string) {
 	}
 }
 
+// installedVersion asks the installed program for its version; "" when there
+// is none or it does not answer.
+func installedVersion(exe string) string {
+	if _, err := os.Stat(exe); err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "version")
+	selfcheck.Hide(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	if f := strings.Fields(string(out)); len(f) >= 2 && f[0] == "autodpi" && update.Valid(f[1]) {
+		return f[1]
+	}
+	return ""
+}
+
 func uninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
 	purge := fs.Bool("purge", false, i18n.T("öğrenilen listeleri de sil", "delete the learned lists too"))
@@ -321,6 +384,7 @@ func uninstall(args []string) {
 	if err := service.Uninstall(paths.Default(), *purge); err != nil {
 		die("%v", err)
 	}
+	selfcheck.Sweep(paths.Default().Support, 0)
 	fmt.Println(i18n.T("kaldırıldı.", "removed."))
 }
 
@@ -380,7 +444,7 @@ func updateCmd(args []string) {
 	call(ipc.Request{Cmd: "update", Action: action}, &u, 45*time.Second)
 	switch {
 	case action == "install":
-		fmt.Printf(i18n.T("%s indiriliyor ve kuruluyor; servis birazdan yeniden başlayacak\n", "downloading and installing %s; the service restarts shortly\n"), u.Latest)
+		fmt.Printf(i18n.T("%s indiriliyor ve kuruluyor; servis birazdan yeniden başlayacak. Başlamazsa nedeni: autodpi log\n", "downloading and installing %s; the service restarts shortly. If it does not, see why with: autodpi log\n"), u.Latest)
 	case action == "skip":
 		fmt.Println(i18n.T("bu sürüm bir daha duyurulmayacak", "this version will not be announced again"))
 	case u.Error != "":
@@ -392,8 +456,6 @@ func updateCmd(args []string) {
 		switch {
 		case !u.Supported:
 			fmt.Println(i18n.T("  bu kurulum kendini güncelleyemiyor; yeni sürümü elle kurun", "  this install cannot update itself; install the new version by hand"))
-		case u.Auto && !u.Skipped && !u.Failed:
-			fmt.Println(i18n.T("  uygun bir anda kendiliğinden kurulacak; hemen kurmak için: autodpi update install", "  it installs by itself at a quiet moment; to install it now: autodpi update install"))
 		default:
 			fmt.Println(i18n.T("  kurmak için: autodpi update install", "  to install it: autodpi update install"))
 		}
@@ -644,4 +706,43 @@ func runLab(args []string) {
 	if err := lab.Run(ctx, lab.Options{Hosts: hosts, Bins: bins, Self: self(), Out: os.Stdout, Force: *force}); err != nil {
 		die("%v", err)
 	}
+}
+
+// selfTest checks, without touching the network or the installed service,
+// that this build's helper programs start on this machine and that its
+// sing-box accepts the configurations its daemon writes. The updater runs it
+// on a downloaded version before that version replaces the installed one, and
+// install runs it before it replaces anything.
+func selfTest() {
+	err := runSelfCheck(os.Stdout)
+	if err == nil {
+		fmt.Println(i18n.T("öz denetim tamam", "self test passed"))
+		return
+	}
+	fmt.Fprintf(os.Stderr, i18n.T("hata: ", "error: ")+"%v\n", err)
+	if errors.Is(err, selfcheck.ErrBroken) {
+		os.Exit(update.SelfTestVerdict) // a verdict; anything else may pass (see update.Probe)
+	}
+	os.Exit(1)
+}
+
+// runSelfCheck extracts the helpers for the check into the install directory
+// when this runs with administrator rights (the updater, install): what an
+// elevated process executes must not sit where another user can replace it.
+// Otherwise the temporary directory does.
+func runSelfCheck(out io.Writer) error {
+	base := os.TempDir()
+	if sysx.IsRoot() {
+		base = paths.Default().Support
+		if err := sysx.SecureDir(base); err != nil {
+			return fmt.Errorf("lock down %s: %w", base, err)
+		}
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			return err
+		}
+	}
+	selfcheck.Sweep(base, 10*time.Minute) // what a run that was cut short left behind
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	defer cancel()
+	return selfcheck.Run(ctx, filepath.Join(base, fmt.Sprintf("%s%d", selfcheck.Prefix, os.Getpid())), out)
 }

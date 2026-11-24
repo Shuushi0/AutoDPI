@@ -30,7 +30,9 @@ func NewDead(ttl time.Duration, limit int) *Dead {
 	if limit < 1 {
 		limit = 1024
 	}
-	return &Dead{ttl: ttl, limit: limit, now: time.Now, cur: map[DeadKey]time.Time{}}
+	// Wall-clock time: the monotonic clock does not run while a Mac sleeps,
+	// and an entry made before the lid closed would live for hours.
+	return &Dead{ttl: ttl, limit: limit, now: func() time.Time { return time.Now().Round(0) }, cur: map[DeadKey]time.Time{}}
 }
 
 // Has reports whether k is remembered and not yet expired. It is the
@@ -42,7 +44,15 @@ func (d *Dead) Has(k DeadKey) bool {
 		exp, ok = d.prev[k]
 	}
 	d.mu.RUnlock()
-	return ok && d.now().Before(exp)
+	return ok && d.live(exp, d.now())
+}
+
+// live reports whether an entry that expires at exp still counts at now. One
+// that expires more than ttl from now was made before the clock was set back
+// (a time correction, a dual-boot machine): its real age is unknown, so it
+// goes rather than live for the size of the jump.
+func (d *Dead) live(exp, now time.Time) bool {
+	return now.Before(exp) && exp.Sub(now) <= d.ttl
 }
 
 // Add remembers k for the cache's ttl, renewing an existing entry.
@@ -70,12 +80,12 @@ func (d *Dead) Len() int {
 	defer d.mu.RUnlock()
 	now, n := d.now(), 0
 	for _, exp := range d.cur {
-		if now.Before(exp) {
+		if d.live(exp, now) {
 			n++
 		}
 	}
 	for k, exp := range d.prev {
-		if _, dup := d.cur[k]; !dup && now.Before(exp) {
+		if _, dup := d.cur[k]; !dup && d.live(exp, now) {
 			n++
 		}
 	}

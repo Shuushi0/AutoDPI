@@ -15,13 +15,14 @@ Download the archive for your system from the [Releases page](https://github.com
 **macOS (Apple Silicon, macOS 13+)**
 
 ```bash
-unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*
+unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*/
 xattr -dr com.apple.quarantine .        # the binaries are not notarized
 sudo ./autodpi install                  # root launchd daemon, starts at boot, and the menu bar app
 autodpi status
 ```
 
-Remove it with `sudo autodpi uninstall [--purge]` (`--purge` also deletes the learned lists).
+Remove it with `sudo autodpi uninstall [--purge]` (`--purge` also deletes the learned lists). The menu bar
+app is not removed by it: quit it and move `/Applications/AutoDPI.app` to the Trash.
 
 **Windows 10 (1803 or later) or 11, 64-bit**: extract the whole zip to a folder and double-click
 `AutoDPI.cmd`. It asks for administrator rights and opens a menu: install, status and list, control
@@ -82,11 +83,12 @@ autodpi maint <action>         clear-logs | restart | shutdown | flush-dns | ret
 autodpi update [install|skip]  look for a newer version (install: now; skip: skip this version)
 autodpi ui [--no-open]         the settings page in the browser
 autodpi doctor | lab           diagnostics, including other tools' DNS rules (lab: which technique opens what on this network)
+autodpi selftest               do this copy's helper programs work on this computer (touches no network)
 ```
 
 Emergency brake: `./restore-network.sh` in the macOS folder, or on Windows `restore-network.ps1` in the
-folder (key 0 of the `AutoDPI.cmd` menu), stops everything and puts DNS back. In the source tree they
-are in `scripts/`.
+folder (key 0 of the `AutoDPI.cmd` menu), stops everything and puts DNS back. On macOS the service then stays off until
+the next boot or `sudo ./autodpi install`. In the source tree they are in `scripts/`.
 
 ## How it works
 
@@ -107,17 +109,21 @@ app ─► sing-box TUN ─┬─ blocked site on this network ─► engine ─
   resolvers, with failover); your original setting is saved and restored on stop. QUIC is refused only
   for listed sites so their apps fall back to TCP. IPv6 is captured only when the network has it.
 - **Fail-open**: helper processes die with the daemon, the capture is released if its health checks keep
-  failing, and re-engaging backs off. Real use is about 70 MB and ~2 % of one core.
+  failing, and re-engaging backs off. Real use is under 100 MB and ~2 % of one core.
 
 ## Updates
 
-The service looks for a newer release on GitHub once a day. It downloads it, checks the release's
-signature (an installed copy accepts only archives signed with the project's key) and installs it once
-the connection is idle; the service restarts for a few seconds. A new version that does not come up
-properly is replaced by the previous one, which then does not install it again by itself. With
-automatic updates off, the menu bar app, the tray window and the page announce the new version with
-Update, Notes and Skip buttons. Both settings are in Settings → Updates on the page and apply without
-a restart; the menu bar app and the tray window have Check for updates under the version line.
+The service looks for a newer release on GitHub once a day. When there is one, the menu bar app, the
+tray window and the page announce it with Update, Notes and Skip buttons. Nothing is installed by
+itself: the new version is downloaded and installed when you press Update (or run
+`autodpi update install`). The release's signature is checked first (an installed copy accepts only
+archives signed with the project's key), and before it replaces anything the new version checks itself
+on your computer (`autodpi selftest`); one that fails that is left alone. The service restarts for a
+few seconds. The new version stays once its capture has worked for ten minutes. If sing-box does not
+start for five minutes, or nothing passes through it for twenty, the previous version comes back.
+While the service is paused, offline or waiting for another tunnel, that decision waits. How often to
+look is in Settings → Updates on the page and applies without a restart; the menu bar app and the tray
+window have Check for updates under the version line.
 
 ## Configuration
 
@@ -135,19 +141,20 @@ Optional `config.json` next to the state file (`/Library/Application Support/Aut
 | `local_domains` | `[]` | extra domain suffixes answered by the network's own DNS (company or school networks); `.local`, `.lan`, `.corp`, `.internal` and single-word names always are |
 | `retest_hours` | `3` | how often listed sites are re-checked |
 | `spoof_sni` | `www.google.com` | decoy name for `tlsspoof` |
-| `auto_update` | `true` | install a newer version by itself once the connection is idle; off, it is only announced |
 | `update_check_hours` | `24` | how often to look for a newer version; `0`: only when asked |
 | `language` | (the system's) | `"tr"` or `"en"`: the language of the command line, the apps and the page |
 | `hedge_ms`, `first_byte_ms`, `max_conn`, `ciadpi_args`, `ipv4_only`, `warp_profile` | | advanced |
 
 ## Build from source
 
-Needs Go, the Xcode Command Line Tools (clang and swiftc) and curl, on an Apple Silicon Mac. Everything
+Needs Go 1.27.4 or newer, the Xcode Command Line Tools (clang and swiftc), curl, zip and a network
+connection, on an Apple Silicon Mac (`scripts/release.sh` also runs the tests and `govulncheck`, and stops
+when a test fails or a published vulnerability is found). Everything
 the daemon embeds is pinned and checksum-verified: sing-box 1.14.4 is built from source with only the
-needed tags (`tools/singbox`), byedpi 0.17.3 from its release tarball.
+parts AutoDPI uses (`tools/singbox`), byedpi 0.17.3 from its release tarball.
 
 ```bash
-scripts/release.sh 0.1.1        # dist/release/*.zip for macOS and Windows (cross-built) + SHA256SUMS
+scripts/release.sh              # dist/release/autodpi-*-dev.zip for macOS and Windows (unsigned without a signing key)
 go test -race ./...             # tests; scripts/dev/e2e-notun.sh runs the whole pipeline without root
 ```
 

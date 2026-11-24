@@ -296,15 +296,29 @@ func TestArea4_MergeConfigEdges(t *testing.T) {
 		t.Errorf("saved file does not load: %v", err)
 	}
 
-	// invalid existing JSON is reported, not overwritten
-	os.WriteFile(p, []byte(`{oops`), 0o644)
-	if _, err := MergeConfig(p, goodSettings()); err == nil {
-		t.Error("corrupt existing config silently replaced")
-	}
-	// JSON array root
-	os.WriteFile(p, []byte(`[]`), 0o644)
-	if _, err := MergeConfig(p, goodSettings()); err == nil {
-		t.Error("array root accepted")
+	// Existing JSON that does not parse (the service ignores such a file and
+	// runs on defaults) is replaced, never silently: the old file is kept
+	// beside it. Refusing left the page unable to save anything at all.
+	for _, bad := range []string{`{oops`, `[]`} {
+		os.WriteFile(p, []byte(bad), 0o644)
+		os.Remove(p + ".broken")
+		out, err := MergeConfig(p, goodSettings())
+		if err != nil {
+			t.Errorf("%s: a save over an unreadable config was refused: %v", bad, err)
+			continue
+		}
+		if _, err := config.Parse(out); err != nil {
+			t.Errorf("%s: the replacement does not parse: %v", bad, err)
+		}
+		// MergeConfig writes nothing itself: the old file is handed to the
+		// caller, which keeps it only once the save went through.
+		if old := Unusable(p); string(old) != bad {
+			t.Errorf("%s: the unusable file is not reported for keeping (%q)", bad, old)
+		}
+		kept := KeepOld(p, []byte(bad))
+		if b, err := os.ReadFile(kept); err != nil || string(b) != bad {
+			t.Errorf("%s: the old file was not kept (%q, %v)", bad, kept, err)
+		}
 	}
 	// existing file unreadable (directory)
 	if _, err := MergeConfig(dir, goodSettings()); err == nil {

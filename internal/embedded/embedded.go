@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/Shuushi0/AutoDPI/internal/sysx"
 )
@@ -197,6 +198,12 @@ func ensure(dst string, open func() (io.ReadCloser, error), want string) error {
 		tmp.Close()
 		return err
 	}
+	// To disk before the rename: a helper that reads back empty after a
+	// power cut has the right name and is found "damaged" at every start.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -205,5 +212,12 @@ func ensure(dst string, open func() (io.ReadCloser, error), want string) error {
 			return err
 		}
 	}
-	return os.Rename(tmp.Name(), dst)
+	// Windows: the helper that just exited may still be mapped for a moment,
+	// and a security program may hold the fresh file while it scans it.
+	for i := 0; ; i++ {
+		if err = os.Rename(tmp.Name(), dst); err == nil || runtime.GOOS != "windows" || i == 20 {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

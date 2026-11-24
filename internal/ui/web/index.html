@@ -206,7 +206,7 @@
       </article>
       <article class="card">
         <div class="card-h"><span class="ico blue"><svg><use href="#k-update"/></svg></span><h3>[[Güncellemeler|Updates]]</h3></div>
-        <label class="swrow"><span class="t"><b>[[Güncellemeleri otomatik yükle|Install updates automatically]]</b><small>[[Yeni sürüm indirilir, imzası doğrulanır ve bağlantı boşta kalınca kurulur. Kapalıyken yalnızca duyurulur.|A new version is downloaded, its signature checked, and it installs once the connection is idle. Off, it is only announced.]] <code>auto_update</code></small></span><input id="auto_update" type="checkbox" class="sw-in"><span class="track" aria-hidden="true"></span></label>
+        <p class="fhelp lead-help">[[Yeni sürüm çıktığında burada ve AutoDPI penceresinde duyurulur; Güncelle'ye bastığınızda kurulur. Kendiliğinden hiçbir şey kurulmaz.|A new version is announced here and in the AutoDPI window, and installed when you press Update. Nothing installs by itself.]]</p>
         <div class="field updfield">
           <label for="update_check_hours" class="ftitle">[[Güncellemeleri denetle|Check for updates]] <code>update_check_hours</code></label>
           <select id="update_check_hours">
@@ -215,7 +215,7 @@
             <option value="168">[[Haftada bir|Once a week]]</option>
             <option value="0">[[Yalnızca istenince|Only when asked]]</option>
           </select>
-          <p class="fhelp">[[Bu iki ayar servisi yeniden başlatmadan uygulanır.|These two settings apply without restarting the service.]]</p>
+          <p class="fhelp">[[Bu ayar servisi yeniden başlatmadan uygulanır.|This setting applies without restarting the service.]]</p>
         </div>
         <div class="updcheckrow">
           <p id="updstate" class="fhelp updstate"></p>

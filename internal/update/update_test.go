@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,48 @@ func TestCompare(t *testing.T) {
 	} {
 		if got := Compare(c.a, c.b); got != c.want {
 			t.Errorf("Compare(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+// One version, one spelling: a second way to write 0.1.1 would compare equal
+// to it while naming another archive. And nothing in a version may mean
+// something in a file name or an address.
+func TestValidRefusesOtherSpellings(t *testing.T) {
+	for _, v := range []string{"0.1.1", "10.20.30", "0.1.1-rc1", "0.1.0-gsb3", "1.0.0-a.b-c"} {
+		if !Valid(v) {
+			t.Errorf("Valid(%q) = false", v)
+		}
+	}
+	for _, v := range []string{"", "0.1", "0.1.1.1", "+0.1.1", "0.+1.1", "0.1.1-", "0.1.1- ", "0.1.1-a b", "0.1.1-../x", "0.1.1-a/b",
+		`0.1.1-a\b`, "0.1.1-a\n", " 0.1.1", "0.1.1 ", "0.01.1", "0.1.-1", "0.1.1-é", "1234567890.0.0", "0.1.1-" + strings.Repeat("a", 65)} {
+		if Valid(v) {
+			t.Errorf("Valid(%q) = true", v)
+		}
+	}
+}
+
+// The page address goes to ShellExecute and window.open: only GitHub's own
+// https address passes, anything else becomes the tag's page in Repo.
+func TestPickKeepsOnlyAGitHubPage(t *testing.T) {
+	const p = "autodpi-macos-arm64-"
+	own := "https://github.com/" + Repo + "/releases/tag/v0.2.0"
+	for raw, want := range map[string]string{
+		"https://github.com/Shuushi0/AutoDPI/releases/tag/v0.2.0": "https://github.com/Shuushi0/AutoDPI/releases/tag/v0.2.0",
+		"http://github.com/x":                 own,
+		"https://github.com.evil.example/x":   own,
+		"https://user@github.com/x":           own,
+		"javascript:alert(1)":                 own,
+		`C:\Windows\System32\calc.exe`:        own,
+		`\\host\share\x.exe`:                  own,
+		"file:///Applications/Calculator.app": own,
+		"":                                    own,
+	} {
+		r := rel("v0.2.0", false, p+"0.2.0.zip", "SHA256SUMS", "SHA256SUMS.sig")
+		r.URL = raw
+		got := pick([]ghRelease{r}, "0.1.0", p)
+		if got == nil || got.URL != want {
+			t.Errorf("page %q -> %+v, want %q", raw, got, want)
 		}
 	}
 }
@@ -319,5 +362,168 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if got := LoadState(f); got.ETag != "x" || got.Skipped != "0.2.0" || got.Latest.Version != "0.2.0" {
 		t.Fatalf("loaded %+v", got)
+	}
+}
+
+// A new version that starts and names itself correctly, but whose own checks
+// fail on this machine (its sing-box refuses the configuration, say), is not
+// installed, and the caller can tell that trying again is pointless.
+func TestApplyRefusesAVersionThatFailsItsSelfTest(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	os.WriteFile(filepath.Join(st.Dir, "autodpi"), []byte(`#!/bin/sh
+case "$1" in
+version) echo 'autodpi 0.2.0 (test)' ;;
+selftest) echo 'ok  sing-box version 1.14.4'; echo 'error: sing-box refuses the configuration for the usual capture: unknown inbound type: tun' >&2; exit 3 ;;
+esac
+`), 0o755)
+	var s State
+	err := Apply(p, st, "0.1.0", &s)
+	if !errors.Is(err, ErrSelfTest) || !strings.Contains(err.Error(), "unknown inbound type: tun") {
+		t.Fatalf("err = %v, want the self test's reason", err)
+	}
+	if read(t, p.Installed) != "old" || s.Pending != nil {
+		t.Fatal("a refused update changed something")
+	}
+	if _, err := os.Stat(oldPath(p.Installed)); !os.IsNotExist(err) {
+		t.Fatal("a refused update left files behind")
+	}
+}
+
+func TestApplyCallsAWrongVersionASelfTestFailure(t *testing.T) {
+	p, st := fakeInstall(t, "0.1.9")
+	if err := Apply(p, st, "0.1.0", &State{}); !errors.Is(err, ErrSelfTest) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A self test that could not be carried out is not a verdict on the release:
+// only the exit code it reserves for one is. Otherwise a full disk or an
+// antivirus scan would bar a good version for good.
+func TestASelfTestThatCouldNotRunIsNoVerdict(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	os.WriteFile(filepath.Join(st.Dir, "autodpi"), []byte(`#!/bin/sh
+case "$1" in
+version) echo 'autodpi 0.2.0 (test)' ;;
+selftest) echo 'error: extract sing-box: no space left on device' >&2; exit 1 ;;
+esac
+`), 0o755)
+	var s State
+	err := Apply(p, st, "0.1.0", &s)
+	if err == nil || errors.Is(err, ErrSelfTest) || !strings.Contains(err.Error(), "no space left") {
+		t.Fatalf("err = %v, want a plain error with the reason", err)
+	}
+	if read(t, p.Installed) != "old" || s.Pending != nil {
+		t.Fatal("a failed check changed something")
+	}
+}
+
+func TestProbeSaysWhenTheDownloadIsGone(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	os.RemoveAll(st.Dir)
+	if err := Probe(context.Background(), p, st); !errors.Is(err, ErrGone) || errors.Is(err, ErrSelfTest) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// Rollback runs inside the version it removes. On Windows that program can be
+// renamed but neither deleted nor overwritten, so the new files are moved
+// aside, never removed first; what was moved aside goes with the next cleanup.
+func TestRollbackMovesTheNewFilesAsideAndPutsTheOldBack(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	var s State
+	if err := Apply(p, st, "0.1.0", &s); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(p, &s, "did not work"); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, p.Installed) != "old" || read(t, filepath.Join(AppPath, "Contents", "v")) != "old" {
+		t.Fatal("the old files are not back")
+	}
+	if s.Pending != nil || s.Failed != "0.2.0" || s.Last == nil || s.Last.OK || s.Last.Error != "did not work" {
+		t.Fatalf("state: %+v last=%+v", s, s.Last)
+	}
+	for _, leftover := range []string{oldPath(p.Installed), failedPath(p.Installed), oldPath(AppPath), failedPath(AppPath)} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("%s is left behind", leftover)
+		}
+	}
+	// What a running program on Windows leaves aside goes at the next start.
+	os.WriteFile(failedPath(p.Installed), []byte("new"), 0o755)
+	if a := Resume(p, "0.1.0", &s); a != Nothing {
+		t.Fatalf("Resume = %v", a)
+	}
+	if _, err := os.Stat(failedPath(p.Installed)); !os.IsNotExist(err) {
+		t.Fatal("the file a rollback moved aside survives the next start's cleanup")
+	}
+}
+
+// With the previous program gone there is nothing to go back to. That is an
+// error, and the state must not claim a rollback.
+func TestRollbackWithoutThePreviousProgramChangesNothing(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	var s State
+	if err := Apply(p, st, "0.1.0", &s); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(oldPath(p.Installed))
+	if err := Rollback(p, &s, "did not work"); err == nil {
+		t.Fatal("rolled back to a program that is not there")
+	}
+	if s.Pending == nil || s.Failed != "" || !strings.Contains(read(t, p.Installed), "0.2.0") {
+		t.Fatalf("state or files changed: pending=%+v failed=%q", s.Pending, s.Failed)
+	}
+	// The start that would roll back keeps the version running instead of
+	// trying, and failing, at every start from then on.
+	s.Pending.Starts = MaxStarts
+	if a := Resume(p, "0.2.0", &s); a != Confirm || s.Pending == nil || s.Pending.Starts != MaxStarts {
+		t.Fatalf("Resume = %v, pending = %+v", a, s.Pending)
+	}
+	if s.Last == nil || !strings.Contains(s.Last.Error, "could not go back") {
+		t.Fatalf("the failed rollback is not recorded: %+v", s.Last)
+	}
+}
+
+func TestStateKeepsInstallTries(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "update.json")
+	s := State{Tries: &Tries{Version: "0.2.0", N: 2}}
+	if err := s.Save(f); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadState(f); got.Tries == nil || *got.Tries != *s.Tries {
+		t.Fatalf("tries = %+v", got.Tries)
+	}
+}
+
+// On Windows a tray app that never restarted after the last update still runs
+// from the file kept aside then, which cannot be removed. A new update must
+// not fail for that: what cannot be removed is renamed out of the way.
+func TestSwapGetsPastALeftoverThatCannotBeRemoved(t *testing.T) {
+	p, st := fakeInstall(t, "0.2.0")
+	// A directory with something in it stands in for a file that will not go
+	// away at the first try: os.Rename onto it fails as it does on a running
+	// image, os.RemoveAll is what normally clears it. Make RemoveAll fail.
+	stuck := oldPath(p.Installed)
+	if err := os.MkdirAll(filepath.Join(stuck, "held"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		m, _ := filepath.Glob(stuck + "*")
+		for _, f := range m {
+			os.Chmod(f, 0o755)
+		}
+	})
+	var s State
+	if err := Apply(p, st, "0.1.0", &s); err != nil {
+		t.Fatalf("the update failed over a leftover it could not remove: %v", err)
+	}
+	if !strings.Contains(read(t, p.Installed), "0.2.0") || read(t, oldPath(p.Installed)) != "old" {
+		t.Fatal("the files are not swapped")
+	}
+	if m, _ := filepath.Glob(stuck + "-*"); len(m) != 1 {
+		t.Fatalf("the leftover was not moved aside: %v", m)
 	}
 }

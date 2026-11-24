@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 
+	"github.com/Shuushi0/AutoDPI/internal/domain"
 	"github.com/Shuushi0/AutoDPI/internal/i18n"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 type Config struct {
@@ -58,12 +62,13 @@ type Config struct {
 	DoHServers []string `json:"doh_servers"`
 	// WarpProfile is the path of a wgcf profile; setting it enables the warp tier.
 	WarpProfile string `json:"warp_profile"`
-	// AutoUpdate installs a newer release by itself, at a quiet moment; off,
-	// the apps only announce it. UpdateCheckHours is how often GitHub is asked
-	// (0: only when the user asks). The daemon reads both afresh before every
-	// look, so a change needs no restart.
-	AutoUpdate       bool `json:"auto_update"`
-	UpdateCheckHours int  `json:"update_check_hours"`
+	// UpdateCheckHours is how often GitHub is asked for a newer release (0:
+	// only when the user asks). A newer one is announced, and installed when
+	// the user asks for it (the Update button, `autodpi update install`);
+	// nothing installs by itself. The daemon reads the value afresh before
+	// every look, so a change needs no restart. (0.1.1 had "auto_update"; a
+	// file that still has the key loads as before, and Tidy takes it out.)
+	UpdateCheckHours int `json:"update_check_hours"`
 	// Language of the command line, the apps and the web page: "tr", "en", or
 	// "" for the system's (internal/i18n reads it). Load accepts any tag
 	// i18n.Normalize maps to one of them and stores the short form.
@@ -84,14 +89,13 @@ func Default() Config {
 		CiadpiArgs:  DefaultCiadpiArgs,
 		MaxConn:     8192,
 		HedgeMS:     1200,
-		FirstByteMS: 6000,
+		FirstByteMS: 15000, // see observer.ConnectTimeout: a slow line is not a block
 		BlockQUIC:   true,
 		IPv4Only:    true,
 		RetestHours: 3,
 		SpoofSNI:    "www.google.com",
 		DNSTakeover: true,
 		DoHServers:  []string{"1.1.1.1", "1.0.0.1"},
-		AutoUpdate:  true,
 
 		UpdateCheckHours: 24,
 	}
@@ -125,6 +129,14 @@ func parse(b []byte, name string) (Config, error) {
 	if l := i18n.Normalize(c.Language); l != "" {
 		c.Language = l // "TR", "tr-TR", "en_US.UTF-8": what the language choice accepts
 	}
+	// As sing-box matches them: lower case, no spaces, no leading dot. It
+	// does not tidy a configured suffix itself, so "CORP" or " corp" was
+	// accepted here and then matched nothing: the company's names went to
+	// DoH without a word.
+	for i, d := range c.LocalDomains {
+		c.LocalDomains[i] = NormalizeSuffix(d)
+	}
+	c.repair()
 	var keys map[string]json.RawMessage
 	if json.Unmarshal(b, &keys) == nil {
 		if _, ok := keys["clean_days"]; ok {
@@ -188,16 +200,114 @@ func (c Config) Validate() error {
 	for _, h := range c.DoHServers {
 		// They become https://<h>/dns-query and a sing-box server address: a
 		// bare IP literal, no port, no zone, nothing else.
-		if a, err := netip.ParseAddr(h); err != nil || a.Zone() != "" {
+		a, err := netip.ParseAddr(h)
+		if err != nil || a.Zone() != "" {
 			return fmt.Errorf(i18n.T("config: doh_servers girdisi %q bir IP adresi değil (IPv4 ya da IPv6; port ve köşeli parantez olmadan)",
 				"config: doh_servers entry %q is not an IP address (IPv4 or IPv6, without port or brackets)"), h)
 		}
+		if a = a.Unmap(); a.IsUnspecified() || a.IsMulticast() {
+			return fmt.Errorf(i18n.T("config: doh_servers girdisi %q bir sunucu adresi olamaz", "config: doh_servers entry %q cannot be a server's address"), h)
+		}
+	}
+	// It is sent as a TLS server name: a host name and nothing else (a port,
+	// a space or a label of 300 characters is none).
+	if c.SpoofSNI != "" && !ValidHostname(c.SpoofSNI) {
+		return fmt.Errorf(i18n.T("config: spoof_sni %q geçerli bir alan adı değil", "config: spoof_sni %q is not a valid host name"), c.SpoofSNI)
 	}
 	return nil
 }
 
 // CiadpiFields splits the strategy into arguments.
 func (c Config) CiadpiFields() []string { return strings.Fields(c.CiadpiArgs) }
+
+// NormalizeSuffix writes a local_domains entry the way it is matched: lower
+// case, without surrounding spaces or a leading dot.
+func NormalizeSuffix(s string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), ".")
+}
+
+// repair puts right what a file written for an earlier version may hold and
+// this one would refuse, one value at a time and with a warning each. A
+// refusal would be worse: a file that fails validation is ignored as a whole
+// (the service must start), so a single such value used to throw away every
+// setting the user had made, DNS takeover switched off included, at the
+// first start after an update and with nothing on screen.
+func (c *Config) repair() {
+	warn := func(format string, a ...any) { c.Warnings = append(c.Warnings, fmt.Sprintf(format, a...)) }
+	// spoof_sni: tidied, and the default in place of something that is no
+	// host name at all.
+	if sni := strings.TrimSuffix(strings.TrimSpace(c.SpoofSNI), "."); sni != c.SpoofSNI {
+		c.SpoofSNI = sni
+	}
+	if c.SpoofSNI != "" && !ValidHostname(c.SpoofSNI) {
+		warn("spoof_sni %q is not a host name; using %s", c.SpoofSNI, Default().SpoofSNI)
+		c.SpoofSNI = Default().SpoofSNI
+	}
+	// doh_servers: an address that can be no server's is left out (with
+	// none left, the defaults apply).
+	kept := c.DoHServers[:0:0]
+	for _, h := range c.DoHServers {
+		if a, err := netip.ParseAddr(h); err == nil && a.Zone() == "" {
+			if a = a.Unmap(); a.IsUnspecified() || a.IsMulticast() {
+				warn("doh_servers entry %q cannot be a server's address; left out", h)
+				continue
+			}
+		}
+		kept = append(kept, h)
+	}
+	if len(kept) != len(c.DoHServers) {
+		c.DoHServers = kept
+	}
+	// local_domains: kept as they are. An entry that is a public suffix is
+	// only said so; the settings page refuses to add a new one.
+	for _, d := range c.LocalDomains {
+		if CheckLocalDomain(d) != nil && validSuffix(d) {
+			warn("local_domains entry %q is a public suffix: every name under it is asked of the network's own DNS", d)
+		}
+	}
+}
+
+// CheckLocalDomain is the settings page's check of a local_domains entry the
+// user adds: a domain name, and not a public suffix. Every name under an
+// entry is asked of the network's own resolver instead of DoH, so "com" would
+// hand all of .com back to the resolver this program exists to avoid. The
+// suffixes that are local by definition (home.arpa and the rest of the
+// built-in list, anything under .arpa) are no such mistake.
+func CheckLocalDomain(d string) error {
+	name := NormalizeSuffix(d)
+	if !validSuffix(name) {
+		return fmt.Errorf(i18n.T("config: local_domains içindeki %q bir alan adı değil", "config: local_domains entry %q is not a domain name"), d)
+	}
+	if name == "arpa" || strings.HasSuffix(name, ".arpa") || slices.Contains(domain.LocalSuffixes(), name) {
+		return nil
+	}
+	if suffix, icann := publicsuffix.PublicSuffix(name); icann && suffix == name {
+		return fmt.Errorf(i18n.T("config: local_domains içindeki %q genel bir alan adı uzantısı; altındaki her ad ağın kendi DNS'ine sorulurdu. Yerel ağınızın son ekini yazın (ör. sirket.local)",
+			"config: local_domains entry %q is a public suffix; every name under it would be asked of the network's own DNS. Enter your local network's suffix (for example company.local)"), d)
+	}
+	return nil
+}
+
+// ValidHostname reports whether s is a DNS name: at most 253 bytes, dot
+// separated labels of 1 to 63 letters, digits, '-' or '_', none starting or
+// ending with '-'. One label is enough (an intranet name).
+func ValidHostname(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // validSuffix reports whether s is a domain name (a leading dot is allowed):
 // dot-separated labels of letters, digits, '-' and '_'.

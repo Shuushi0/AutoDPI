@@ -153,7 +153,10 @@ func New(o Options) *Observer {
 		o.HelloWait = 2 * time.Second
 	}
 	if o.ConnectTimeout == 0 {
-		o.ConnectTimeout = 5 * time.Second
+		// Long enough for a line that stalls for a few seconds: a browser on
+		// its own waits far longer than this, and an attempt cut short here is
+		// a "connection closed" page it would not have shown.
+		o.ConnectTimeout = 12 * time.Second
 	}
 	if o.FirstByte == 0 {
 		o.FirstByte = 6 * time.Second
@@ -414,7 +417,7 @@ func (o *Observer) passthrough(c net.Conn, dest string, first []byte) {
 			return
 		}
 	}
-	relay(c, up)
+	o.relay(c, up)
 }
 
 type attempt struct {
@@ -480,7 +483,7 @@ func (o *Observer) light(c net.Conn, dest string, hello []byte, opened func()) (
 	if werr != nil {
 		return true, nil
 	}
-	relay(c, a.conn)
+	o.relay(c, a.conn)
 	return true, nil
 }
 
@@ -579,7 +582,7 @@ func (o *Observer) observe(c net.Conn, dest, asked string, ip netip.Addr, port i
 	if werr != nil {
 		return
 	}
-	relay(c, win.conn)
+	o.relay(c, win.conn)
 }
 
 // race starts the direct attempt, then escalates through the engines: at once
@@ -594,10 +597,11 @@ func (o *Observer) observe(c net.Conn, dest, asked string, ip netip.Addr, port i
 // the wait and the traffic.
 //
 // When nothing delivered, the report holds only the failures. rejected says the
-// server itself turned the flow away: some engine opened the connection upstream, sent
-// the ClientHello and was answered by a reset, a close or junk, not by silence.
-// That, unlike "no engine configured", "engine down", a full racing cap or a
-// plain timeout, is proof that no path will open this destination for now.
+// server itself turned the flow away: every engine of the ladder opened the
+// connection upstream, sent the ClientHello and was answered by a reset, a
+// close or junk, not by silence (see turnedAway). That, unlike "no engine
+// configured", "engine down", a full racing cap or a plain timeout, is proof
+// that no path will open this destination for now.
 // blocked says the direct attempt failed with DPI evidence (Event.Blocked).
 //
 // The first escalation takes one of the destination's racing slots (held until
@@ -653,9 +657,6 @@ func (o *Observer) race(dest string, ip netip.Addr, port int, hello []byte, dire
 			blocked = blocked || ev
 		}
 		evidence = evidence || ev
-		if f.name != "direct" && f.connected && !isTimeout(f.err) {
-			rejected = true
-		}
 	}
 	if directFailed != nil {
 		fail(*directFailed)
@@ -704,10 +705,33 @@ loop:
 		report[f.name] = f.String()
 	}
 	if win == nil {
-		return nil, report, rejected, blocked
+		return nil, report, turnedAway(failures, len(engines), fetched), blocked
 	}
 	report[win.name] = fmt.Sprintf("ok %dms", win.took.Milliseconds())
 	return win, report, false, blocked
+}
+
+// turnedAway reports whether the server itself rejected the flow on every
+// path there is: each engine of the ladder was tried, opened the connection
+// upstream and got an answer that was not silence. One engine that was down,
+// never started or ran out of time leaves the question open: it may be the
+// one that opens this destination (seen: the name parked for ten minutes
+// because the engine that works was restarting for a second).
+func turnedAway(failures []outcome, engines int, fetched bool) bool {
+	if !fetched || engines == 0 {
+		return false
+	}
+	n := 0
+	for _, f := range failures {
+		if f.name == "direct" {
+			continue
+		}
+		if !f.connected || isTimeout(f.err) {
+			return false
+		}
+		n++
+	}
+	return n == engines
 }
 
 var errInjected = errors.New("non-TLS reply to ClientHello")
@@ -805,8 +829,16 @@ func closeWrite(c net.Conn) {
 var bufPool = sync.Pool{New: func() any { b := make([]byte, 16<<10); return &b }}
 
 // relay shuttles bytes both ways. A clean EOF half-closes the other side; an
-// error tears both down.
-func relay(a, b net.Conn) {
+// error tears both down, and so does Close: only the client's socket is
+// tracked, and after a client that half-closed the copy from the server reads
+// on with nothing left to wake it (seen: a shutdown that waited on one such
+// flow for as long as its server kept the connection).
+func (o *Observer) relay(a, b net.Conn) {
+	stop := context.AfterFunc(o.ctx, func() {
+		a.Close()
+		b.Close()
+	})
+	defer stop()
 	var wg sync.WaitGroup
 	cp := func(dst, src net.Conn) {
 		defer wg.Done()

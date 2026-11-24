@@ -15,13 +15,14 @@ English: [README.md](README.md)
 **macOS (Apple Silicon, macOS 13+)**
 
 ```bash
-unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*
+unzip autodpi-macos-arm64-*.zip && cd autodpi-macos-arm64-*/
 xattr -dr com.apple.quarantine .        # dosyalar Apple tarafından notarize edilmedi
 sudo ./autodpi install                  # açılışta başlayan root launchd servisi ve menü çubuğu uygulaması
 autodpi status
 ```
 
-Kaldırmak için `sudo autodpi uninstall [--purge]` (`--purge` öğrenilen listeleri de siler).
+Kaldırmak için `sudo autodpi uninstall [--purge]` (`--purge` öğrenilen listeleri de siler). Menü çubuğu
+uygulamasını bu komut silmez: uygulamadan çıkıp `/Applications/AutoDPI.app` dosyasını çöpe atın.
 
 **Windows 10 (1803 ve sonrası) ya da 11, 64 bit**: zip'in tamamını bir klasöre çıkarın ve `AutoDPI.cmd`
 dosyasına çift tıklayın. Yönetici izni ister ve bir menü açar: kurulum, durum ve liste, kontrol paneli,
@@ -80,10 +81,12 @@ autodpi maint <eylem>          clear-logs | restart | shutdown | flush-dns | ret
 autodpi update [install|skip]  yeni sürümü denetle (install: şimdi kur; skip: bu sürümü atla)
 autodpi ui [--no-open]         tarayıcıda ayar sayfası
 autodpi doctor | lab           tanı, başka araçların DNS kuralları dahil (lab: bu ağda hangi teknik neyi açıyor)
+autodpi selftest               bu kopyanın yardımcı programları bu bilgisayarda çalışıyor mu (ağa dokunmaz)
 ```
 
 Acil fren: macOS klasöründeki `./restore-network.sh` ya da Windows'ta klasördeki `restore-network.ps1`
-(`AutoDPI.cmd` menüsünde 0) her şeyi durdurur ve DNS'i geri koyar. Kaynak ağacında ikisi de `scripts/`
+(`AutoDPI.cmd` menüsünde 0) her şeyi durdurur ve DNS'i geri koyar. macOS'ta servis bundan sonra bir sonraki
+açılışa ya da `sudo ./autodpi install` komutuna kadar kapalı kalır. Kaynak ağacında ikisi de `scripts/`
 altında.
 
 ## Nasıl çalışır
@@ -98,24 +101,28 @@ uygulama ─► sing-box TUN ─┬─ bu ağda engelli site ─► motor ─►
 
 - **Motorlar**, sırayla: `tlsrec` (ClientHello'yu iki TLS kaydına böler), `ciadpi` (byedpi desync zinciri), `tlsspoof` (sahte ClientHello, yalnızca root).
 - **Öğrenme ağa özeldir** (ISS'nin AS numarasına göre) ve kayıt edilebilir alan adı olarak tutulur. Art arda
-  birkaç kez direkt açılan site bellekte önbelleğe alınır ve hafif yoldan geçer; sonradan engellenirse F5'te
-  açılır ve listeye girer. Yalnızca RST ya da enjekte edilmiş cevap engel sayılır; hat takılması hiçbir şeyi
+  birkaç kez direkt açılan site bellekte önbelleğe alınır ve hafif yoldan geçer; sonradan engellenirse yeniden
+  denemede açılır ve listeye girer. Yalnızca RST ya da enjekte edilmiş cevap engel sayılır; hat takılması hiçbir şeyi
   listeye sokmaz.
 - **DNS**: servis aktifken sistem çözücüsü 1.1.1.1'e bakar, TUN bunu DoH ile yanıtlar (iki çözücü, yedekli);
   asıl ayarınız kaydedilir ve durunca geri yüklenir. QUIC yalnızca listedeki siteler için reddedilir ki o
   uygulamalar TCP'ye insin. IPv6 yalnızca ağda varsa yakalanır.
 - **Fail-open**: yardımcı süreçler daemon'la birlikte ölür, sağlık denetimi kalıcı düşerse yakalama bırakılır,
-  yeniden devreye girme geri çekilmeyle yapılır. Gerçek kullanım yaklaşık 70 MB ve tek çekirdeğin ~%2'si.
+  yeniden devreye girme geri çekilmeyle yapılır. Gerçek kullanım 100 MB'ın altında ve tek çekirdeğin ~%2'si.
 
 ## Güncellemeler
 
-Servis günde bir kez GitHub'da yeni sürüm olup olmadığına bakar. Varsa indirir, sürümün imzasını
-denetler (kurulu kopya yalnızca projenin anahtarıyla imzalanmış arşivleri kabul eder) ve bağlantı
-boştayken kurar; servis birkaç saniyeliğine yeniden başlar. Düzgün açılmayan yeni sürümün yerine önceki
-sürüm geri gelir ve onu bir daha kendiliğinden kurmaz. Otomatik güncelleme kapalıyken menü çubuğu
-uygulaması, tepsi penceresi ve sayfa yeni sürümü Güncelle, Notlar ve Atla düğmeleriyle duyurur. İki ayar
-da sayfada Ayarlar → Güncellemeler'dedir ve yeniden başlatma gerektirmez; menü çubuğu uygulamasında ve
-tepsi penceresinde sürüm satırının yanında Güncellemeleri denetle vardır.
+Servis günde bir kez GitHub'da yeni sürüm olup olmadığına bakar. Varsa menü çubuğu uygulaması, tepsi
+penceresi ve sayfa bunu Güncelle, Notlar ve Atla düğmeleriyle duyurur. Kendiliğinden hiçbir şey
+kurulmaz: yeni sürüm, Güncelle'ye bastığınızda (ya da `autodpi update install` çalıştırdığınızda)
+indirilir ve kurulur. Önce sürümün imzası denetlenir (kurulu kopya yalnızca projenin anahtarıyla
+imzalanmış arşivleri kabul eder) ve yeni sürüm hiçbir şeyi değiştirmeden önce bu bilgisayarda kendini
+denetler (`autodpi selftest`); denetimi geçemeyen kurulmaz. Servis birkaç saniyeliğine yeniden başlar.
+Yeni sürüm, yakalaması on dakika çalışırsa kalır. sing-box beş dakika başlamazsa ya da yirmi dakika
+boyunca içinden hiçbir şey geçmezse önceki sürüm geri gelir. Servis duraklatılmışken, çevrimdışıyken ya
+da başka bir tüneli beklerken bu karar bekler. Ne sıklıkla bakılacağı sayfada Ayarlar → Güncellemeler'dedir
+ve yeniden başlatma gerektirmez; menü çubuğu uygulamasında ve tepsi penceresinde sürüm satırının yanında
+Güncellemeleri denetle vardır.
 
 ## Ayarlar
 
@@ -133,19 +140,20 @@ Windows'ta `%ProgramData%\AutoDPI\`) ya da ayar sayfası. Uygulanması için ser
 | `local_domains` | `[]` | ağın kendi DNS'inin cevaplayacağı ek alan adları (şirket, okul ağları); `.local`, `.lan`, `.corp`, `.internal` ve tek kelimelik adlar her zaman öyle |
 | `retest_hours` | `3` | listedeki sitelerin yeniden kontrol sıklığı |
 | `spoof_sni` | `www.google.com` | `tlsspoof` için sahte ad |
-| `auto_update` | `true` | yeni sürümü bağlantı boştayken kendiliğinden kur; kapalıyken yalnızca duyurulur |
 | `update_check_hours` | `24` | yeni sürüme ne sıklıkla bakılacağı; `0`: yalnızca istenince |
 | `language` | (sistemin dili) | `"tr"` ya da `"en"`: komut satırı, uygulamalar ve sayfanın dili |
 | `hedge_ms`, `first_byte_ms`, `max_conn`, `ciadpi_args`, `ipv4_only`, `warp_profile` | | ileri düzey |
 
 ## Kaynaktan derleme
 
-Apple Silicon bir Mac'te Go, Xcode Command Line Tools (clang ve swiftc) ve curl gerekir. Daemon'ın içine
-gömdüğü her şey sabitlenmiş ve sağlama toplamıyla doğrulanır: sing-box 1.14.4 yalnızca gereken etiketlerle
-kaynaktan derlenir (`tools/singbox`), byedpi 0.17.3 sürüm arşivinden.
+Apple Silicon bir Mac'te Go 1.27.4 ya da yenisi, Xcode Command Line Tools (clang ve swiftc), curl, zip ve ağ
+bağlantısı gerekir (`scripts/release.sh` testleri ve `govulncheck`'i de çalıştırır; bir test düşerse ya da
+yayımlanmış bir açık bulunursa durur). Daemon'ın içine
+gömdüğü her şey sabitlenmiş ve sağlama toplamıyla doğrulanır: sing-box 1.14.4 yalnızca AutoDPI'nin kullandığı
+parçalarla kaynaktan derlenir (`tools/singbox`), byedpi 0.17.3 sürüm arşivinden.
 
 ```bash
-scripts/release.sh 0.1.1        # dist/release/*.zip: macOS ve Windows (çapraz derleme) + SHA256SUMS
+scripts/release.sh              # dist/release/autodpi-*-dev.zip: macOS ve Windows (imza anahtarı yoksa imzasız)
 go test -race ./...             # testler; scripts/dev/e2e-notun.sh bütün hattı root'suz çalıştırır
 ```
 

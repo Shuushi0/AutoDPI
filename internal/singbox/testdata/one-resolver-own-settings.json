@@ -1,0 +1,203 @@
+{
+  "dns": {
+    "final": "doh",
+    "servers": [
+      {
+        "server": "9.9.9.9",
+        "tag": "doh",
+        "type": "https"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "auto_route": true,
+      "dns_mode": "hijack",
+      "stack": "mixed",
+      "strict_route": false,
+      "tag": "tun-in",
+      "type": "tun"
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 21081,
+      "tag": "tlsrec-in",
+      "type": "socks"
+    },
+    {
+      "listen": "127.0.0.1",
+      "listen_port": 21083,
+      "tag": "tlsspoof-in",
+      "type": "socks"
+    }
+  ],
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21080,
+      "tag": "observer",
+      "type": "socks"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 21082,
+      "tag": "ciadpi",
+      "type": "socks"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "doh",
+    "final": "direct",
+    "rule_set": [
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-tlsrec.json",
+        "tag": "blocked-tlsrec",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-ciadpi.json",
+        "tag": "blocked-ciadpi",
+        "type": "local"
+      },
+      {
+        "format": "source",
+        "path": "/run/autodpi/blocked-tlsspoof.json",
+        "tag": "blocked-tlsspoof",
+        "type": "local"
+      }
+    ],
+    "rules": [
+      {
+        "action": "reject",
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "ip_is_private": true
+      },
+      {
+        "action": "route-options",
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "tls_record_fragment": true
+      },
+      {
+        "inbound": [
+          "tlsrec-in"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "reject",
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "ip_is_private": true
+      },
+      {
+        "action": "route-options",
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "tls_spoof": "example.org",
+        "tls_spoof_method": "wrong-sequence"
+      },
+      {
+        "inbound": [
+          "tlsspoof-in"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "action": "sniff",
+        "inbound": [
+          "tun-in"
+        ]
+      },
+      {
+        "action": "hijack-dns",
+        "port": [
+          53
+        ]
+      },
+      {
+        "network": [
+          "udp"
+        ],
+        "outbound": "direct",
+        "port": [
+          5353
+        ]
+      },
+      {
+        "outbound": "direct",
+        "process_name": [
+          "ciadpi",
+          "autodpi",
+          "example"
+        ]
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "action": "route-options",
+        "rule_set": [
+          "blocked-tlsrec"
+        ],
+        "tls_record_fragment": true
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "blocked-tlsrec"
+        ]
+      },
+      {
+        "outbound": "ciadpi",
+        "rule_set": [
+          "blocked-ciadpi"
+        ]
+      },
+      {
+        "action": "route-options",
+        "rule_set": [
+          "blocked-tlsspoof"
+        ],
+        "tls_spoof": "example.org",
+        "tls_spoof_method": "wrong-sequence"
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "blocked-tlsspoof"
+        ]
+      },
+      {
+        "network": [
+          "tcp"
+        ],
+        "outbound": "observer",
+        "port": [
+          443,
+          8443
+        ]
+      }
+    ]
+  }
+}

@@ -96,7 +96,7 @@ func (d *Daemon) status() Status {
 	}
 	return Status{
 		Version: Version, PID: os.Getpid(), State: state, Detail: statusDetail(detail, findings),
-		Uptime:     time.Since(d.started).Round(time.Second).String(),
+		Uptime:     max(wallSince(d.started), 0).Round(time.Second).String(), // asleep counts: it is how long ago the service started
 		SingBoxPID: pid, Network: net, Entries: len(d.st.List(net.Key)), Open: d.openCount(),
 		Engines: d.engineNames(), Observer: d.obs.Stats(), Embedded: embedded.Embedded(),
 		Update: upd, Findings: findings,
@@ -227,7 +227,7 @@ func (d *Daemon) handle(ctx context.Context, r ipc.Request) (any, error) {
 }
 
 func (d *Daemon) hasEngine(name string) bool {
-	for _, e := range d.engines {
+	for _, e := range d.eng() {
 		if e.Name == name {
 			return true
 		}

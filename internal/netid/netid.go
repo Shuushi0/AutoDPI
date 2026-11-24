@@ -330,7 +330,11 @@ func parseOrigin(txt string) (int, error) {
 	if len(f) == 0 {
 		return 0, errors.New("empty origin record")
 	}
-	return strconv.Atoi(f[0])
+	n, err := strconv.ParseUint(f[0], 10, 32)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("origin record names no AS number: %q", f[0])
+	}
+	return int(n), nil
 }
 
 // parseASName reads "9121 | TR | ripencc | 1996-12-02 | TTNET, TR".

@@ -126,7 +126,6 @@ type status struct {
 	Update  *struct {
 		Latest    string `json:"latest"`
 		URL       string `json:"url"`
-		Auto      bool   `json:"auto"`
 		Skipped   bool   `json:"skipped"`
 		Failed    bool   `json:"failed"`
 		Supported bool   `json:"supported"`
@@ -134,11 +133,14 @@ type status struct {
 }
 
 type app struct {
+	lang     string // the language the menu is written in
 	sock     string
 	miniURL  string
 	panelURL string
 	self     string      // this program's file
 	selfFile os.FileInfo // what was there at start; an update replaces it
+
+	refreshMu sync.Mutex // one refresh at a time
 
 	mu    sync.Mutex
 	state string // daemon state, "unreachable", or "" before the first look
@@ -183,19 +185,45 @@ func (a *app) onReady() {
 	systray.SetTooltip("AutoDPI")
 	systray.SetOnTapped(a.togglePopup)
 
-	a.mOpen = systray.AddMenuItem(i18n.T("AutoDPI'yi aç", "Open AutoDPI"), i18n.T("Durum penceresini aç", "Open the status window"))
-	a.mToggle = systray.AddMenuItem(i18n.T("Duraklat", "Pause"), i18n.T("Tüm trafiği serbest bırak (servis açık kalır)", "Let all traffic go (the service stays on)"))
-	a.mStart = systray.AddMenuItem(i18n.T("Servisi başlat", "Start the service"), i18n.T("Sistem servisini başlatır (yönetici izni sorulur)", "Starts the system service (asks for administrator permission)"))
+	a.mOpen = systray.AddMenuItem("", "")
+	a.mToggle = systray.AddMenuItem("", "")
+	a.mStart = systray.AddMenuItem("", "")
 	a.mStart.Hide()
-	a.mPanel = systray.AddMenuItem(i18n.T("Ayarlar (tarayıcıda)", "Settings (in the browser)"), i18n.T("Ayrıntılı ayarlar ve liste tarayıcıda açılır", "Detailed settings and the list open in the browser"))
+	a.mPanel = systray.AddMenuItem("", "")
 	systray.AddSeparator()
-	a.mHide = systray.AddMenuItem(i18n.T("Simgeyi gizle, arka planda çalışsın", "Hide the icon, keep running in the background"),
-		i18n.T("Servis çalışmaya devam eder; simgeyi Başlat menüsündeki AutoDPI geri getirir", "The service keeps running; AutoDPI in the Start menu brings the icon back"))
-	a.mQuit = systray.AddMenuItem(i18n.T("Yalnızca simgeyi kapat", "Close the icon only"), i18n.T("Servis çalışmaya devam eder", "The service keeps running"))
-	a.mShutdown = systray.AddMenuItem(i18n.T("Servisi kapat ve çık", "Shut down the service and quit"), i18n.T("Servisi durdurur ve simgeyi kapatır", "Stops the service and closes the icon"))
+	a.mHide = systray.AddMenuItem("", "")
+	a.mQuit = systray.AddMenuItem("", "")
+	a.mShutdown = systray.AddMenuItem("", "")
+	a.lang = i18n.Lang()
+	a.retitle()
 
 	go a.menuLoop()
 	go a.statusLoop()
+}
+
+// retitle writes the menu in the current language: at start, and again when
+// the language is changed in the settings while the icon is up (it used to
+// stay in the old one until the next sign-in).
+func (a *app) retitle() {
+	set := func(m *systray.MenuItem, title, tip string) {
+		m.SetTitle(title)
+		m.SetTooltip(tip)
+	}
+	set(a.mOpen, i18n.T("AutoDPI'yi aç", "Open AutoDPI"), i18n.T("Durum penceresini aç", "Open the status window"))
+	a.mu.Lock()
+	paused := a.state == "paused"
+	a.mu.Unlock()
+	if paused {
+		set(a.mToggle, i18n.T("Sürdür", "Resume"), i18n.T("Bypass'ı yeniden aç", "Switch the bypass back on"))
+	} else {
+		set(a.mToggle, i18n.T("Duraklat", "Pause"), i18n.T("Tüm trafiği serbest bırak (servis açık kalır)", "Let all traffic go (the service stays on)"))
+	}
+	set(a.mStart, i18n.T("Servisi başlat", "Start the service"), i18n.T("Sistem servisini başlatır (yönetici izni sorulur)", "Starts the system service (asks for administrator permission)"))
+	set(a.mPanel, i18n.T("Ayarlar (tarayıcıda)", "Settings (in the browser)"), i18n.T("Ayrıntılı ayarlar ve liste tarayıcıda açılır", "Detailed settings and the list open in the browser"))
+	set(a.mHide, i18n.T("Simgeyi gizle, arka planda çalışsın", "Hide the icon, keep running in the background"),
+		i18n.T("Servis çalışmaya devam eder; simgeyi Başlat menüsündeki AutoDPI geri getirir", "The service keeps running; AutoDPI in the Start menu brings the icon back"))
+	set(a.mQuit, i18n.T("Yalnızca simgeyi kapat", "Close the icon only"), i18n.T("Servis çalışmaya devam eder", "The service keeps running"))
+	set(a.mShutdown, i18n.T("Servisi kapat ve çık", "Shut down the service and quit"), i18n.T("Servisi durdurur ve simgeyi kapatır", "Stops the service and closes the icon"))
 }
 
 func (a *app) onExit() { a.closePopup() }
@@ -242,6 +270,8 @@ func stateTitle(state string) string {
 		"active": i18n.T("Aktif", "Active"), "starting": i18n.T("Başlıyor", "Starting"), "standby": i18n.T("Beklemede", "Standby"),
 		"paused": i18n.T("Duraklatıldı", "Paused"), "offline": i18n.T("Çevrimdışı", "Offline"), "error": i18n.T("Hata", "Error"),
 		"unreachable": i18n.T("Servis çalışmıyor", "The service is not running"),
+		"busy":        i18n.T("Servis yanıt vermiyor", "The service is not answering"),
+		"denied":      i18n.T("Servise erişim izni yok", "No permission to reach the service"),
 	}[state]
 }
 
@@ -254,17 +284,36 @@ func (a *app) statusLoop() {
 
 // refresh asks the service for its state and updates the icon and the menu.
 func (a *app) refresh() {
+	// One at a time: it is called from the status loop, the menu and after a
+	// start, and two of them side by side could draw one state while the
+	// other had recorded the next (and both wrote a.lang).
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
 	var st status
 	state := "unreachable"
-	if err := ipc.Call(a.sock, ipc.Request{Cmd: "status"}, &st, 5*time.Second); err == nil && st.State != "" {
+	switch err := ipc.Call(a.sock, ipc.Request{Cmd: "status"}, &st, 5*time.Second); {
+	case err == nil && st.State != "":
 		state = st.State
+	case ipc.Kind(err) == ipc.KindBusy:
+		// It runs. "Not running" with a Start button asked for administrator
+		// rights to start a service that was already started.
+		state = "busy"
+	case ipc.Kind(err) == ipc.KindDenied:
+		state = "denied"
 	}
 	a.mu.Lock()
 	changed := state != a.state
 	a.state = state
 	a.mu.Unlock()
+	// The language may have been changed in the settings meanwhile.
+	i18n.Reload()
+	if l := i18n.Lang(); l != a.lang {
+		a.lang = l
+		a.retitle()
+	}
 
-	if state != "unreachable" {
+	answered := state != "unreachable" && state != "busy" && state != "denied"
+	if answered {
 		a.followUpdate(st)
 	}
 
@@ -279,13 +328,18 @@ func (a *app) refresh() {
 	if !changed {
 		return
 	}
-	systray.SetIcon(trayIcon(state))
-	if state == "unreachable" {
+	if !answered {
+		systray.SetIcon(trayIcon("unreachable"))
 		a.mToggle.Hide()
-		a.mStart.Show()
 		a.mShutdown.Disable()
+		if state == "unreachable" {
+			a.mStart.Show() // only where starting it can help
+		} else {
+			a.mStart.Hide()
+		}
 		return
 	}
+	systray.SetIcon(trayIcon(state))
 	a.mStart.Hide()
 	a.mToggle.Show()
 	a.mShutdown.Enable()
@@ -315,9 +369,15 @@ func (a *app) followUpdate(st status) {
 		}
 		s.Seen, changed = st.Version, true
 	}
-	if u := st.Update; u != nil && u.Latest != "" && !u.Skipped && u.Latest != s.Announced && (!u.Auto || !u.Supported || u.Failed) {
-		balloon(i18n.T("AutoDPI "+u.Latest+" hazır", "AutoDPI "+u.Latest+" is out"),
-			i18n.T("Kurmak için AutoDPI penceresini açın.", "Open the AutoDPI window to install it."))
+	if u := st.Update; u != nil && u.Latest != "" && !u.Skipped && u.Latest != s.Announced {
+		if u.Failed {
+			// Not an invitation to install what could not be installed.
+			balloon(i18n.T("AutoDPI "+u.Latest+" kurulamadı", "AutoDPI "+u.Latest+" did not install"),
+				i18n.T("Kurulu sürüm çalışmaya devam ediyor. Ayrıntı AutoDPI penceresinde.", "The installed version keeps running. The AutoDPI window has the details."))
+		} else {
+			balloon(i18n.T("AutoDPI "+u.Latest+" hazır", "AutoDPI "+u.Latest+" is out"),
+				i18n.T("Kurmak için AutoDPI penceresini açın.", "Open the AutoDPI window to install it."))
+		}
 		s.Announced, changed = u.Latest, true
 	}
 	if changed {

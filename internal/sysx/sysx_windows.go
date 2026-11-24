@@ -378,12 +378,16 @@ func terminateAndWait(pid uint32) bool {
 		return false
 	}
 	defer windows.CloseHandle(h)
-	if windows.TerminateProcess(h, 1) != nil {
-		return false
-	}
+	// TerminateProcess fails with "access denied" for a process that is
+	// already on its way out (the job object took it down a moment ago): its
+	// image is still mapped all the same, so that is waited for as well.
+	killed := windows.TerminateProcess(h, 1) == nil
 	_, _ = windows.WaitForSingleObject(h, uint32(killWait/time.Millisecond))
-	return true
+	return killed
 }
+
+// KillPID ends the process pid and waits for it to be gone.
+func KillPID(pid uint32) bool { return terminateAndWait(pid) }
 
 // ProcessRunning reports whether a process with image file name name runs
 // (case-insensitive, e.g. "warp-svc.exe").

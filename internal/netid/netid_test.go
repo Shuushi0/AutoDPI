@@ -17,6 +17,15 @@ func TestParseOrigin(t *testing.T) {
 	if _, err := parseOrigin("  | x"); err == nil {
 		t.Fatal("expected error for empty record")
 	}
+	// The number becomes the network's key: only a real AS number will do.
+	for _, bad := range []string{"-1 | x", "0 | x", "+5 | x", "4294967296 | x", "AS9121 | x", "9121x | x"} {
+		if asn, err := parseOrigin(bad); err == nil {
+			t.Fatalf("parseOrigin(%q) = %d, want an error", bad, asn)
+		}
+	}
+	if asn, err := parseOrigin("4294967295 | x"); err != nil || asn != 4294967295 {
+		t.Fatalf("largest AS number: asn=%d err=%v", asn, err)
+	}
 }
 
 func TestParseASName(t *testing.T) {

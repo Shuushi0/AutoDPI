@@ -23,7 +23,7 @@ body.mini > *, .m-body > * { flex-shrink: 0; }
 .m-title h1 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.2; }
 .m-state { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--sc); }
 .m-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sc); flex: none; }
-.m-detail { margin: 0; font-size: 11px; line-height: 1.3; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.m-detail { margin: 0; font-size: 11px; line-height: 1.3; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .m-pill { all: unset; box-sizing: border-box; cursor: pointer; flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 99px; font-size: 12px; font-weight: 600; color: var(--fg); background: color-mix(in srgb, var(--fg) 9%, transparent); transition: background .12s; }
 .m-pill svg { width: 10px; height: 10px; }
 .m-pill:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 14%, transparent); }
@@ -87,7 +87,7 @@ body.mini > *, .m-body > * { flex-shrink: 0; }
 .m-upd-h > svg { width: 18px; height: 18px; flex: none; color: var(--acc); margin-top: 1px; }
 .m-upd-t { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .m-upd-t b { font-size: 12.5px; font-weight: 600; }
-.m-upd-t span { font-size: 11px; line-height: 1.35; color: var(--muted); }
+.m-upd-t span { font-size: 11px; line-height: 1.35; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .m-upd-a { display: flex; gap: 6px; flex-wrap: wrap; padding-left: 27px; }
 .m-upd-a button { all: unset; box-sizing: border-box; cursor: pointer; padding: 4px 10px; border-radius: 7px; font-size: 11.5px; font-weight: 600; color: var(--fg); background: color-mix(in srgb, var(--fg) 9%, transparent); }
 .m-upd-a button:hover { background: color-mix(in srgb, var(--fg) 14%, transparent); }
