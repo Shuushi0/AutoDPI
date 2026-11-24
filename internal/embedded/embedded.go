@@ -74,6 +74,44 @@ func UserDir(dir string) string {
 	return filepath.Join(os.TempDir(), "autodpi-bin")
 }
 
+// ToolDir is where a tool run from the command line (doctor, lab) extracts
+// its helpers, given the install directory dir.
+//
+// Run as root it used to be dir itself, whatever was there. But the copy
+// that is run and the service that is installed are often not the same
+// version: after an update the folder the program was unpacked into still
+// holds the old one. Its doctor then tried to put its own, older helpers over
+// the ones the running service uses. Windows refused (the file is in use) and
+// the check failed with "access denied"; where nothing held the file (a
+// paused service, macOS) the service's helper was replaced on disk.
+//
+// So helpers that are not this build's are somebody else's and are left
+// alone: this build's go into a folder of their own inside dir (inside, so
+// that what ends everything under dir, and what removes dir, still covers
+// them).
+func ToolDir(dir string) string {
+	d := UserDir(dir)
+	if d == dir && Embedded() && foreign(dir, payloadHashes) {
+		return filepath.Join(dir, "tools")
+	}
+	return d
+}
+
+// foreign reports whether dir holds a helper that is not the one want names.
+// One that cannot be read is not ours to replace either.
+func foreign(dir string, want map[string]string) bool {
+	for _, name := range []string{SingBox, Ciadpi} {
+		have, err := fileHash(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || have != want[name] {
+			return true
+		}
+	}
+	return false
+}
+
 // Paths names the helpers Prepare extracts into dir, without touching them
 // (the daemon ends leftovers from a previous run before replacing files a
 // running process would keep locked on Windows).

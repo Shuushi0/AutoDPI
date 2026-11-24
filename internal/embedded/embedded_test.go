@@ -117,3 +117,44 @@ func TestEnsureOpenError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A tool run from another version's folder must not take the helpers in the
+// install directory for its own to replace.
+func TestForeignHelpersAreSomebodyElses(t *testing.T) {
+	dir := t.TempDir()
+	want := map[string]string{}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hash := func(body string) string {
+		h, err := hashOf(strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	want[SingBox], want[Ciadpi] = hash("sing-box of this build"), hash("ciadpi of this build")
+
+	if foreign(dir, want) {
+		t.Fatal("an empty directory was taken for another version's")
+	}
+	write(SingBox, "sing-box of this build")
+	if foreign(dir, want) {
+		t.Fatal("this build's own helper (and one not yet written) was taken for another version's")
+	}
+	write(Ciadpi, "ciadpi of this build")
+	if foreign(dir, want) {
+		t.Fatal("this build's own helpers were taken for another version's")
+	}
+	write(SingBox, "sing-box of the installed, newer service")
+	if !foreign(dir, want) {
+		t.Fatal("another version's sing-box was taken for this build's: it would be overwritten")
+	}
+	// Not root in a test: the user's own folder, never the install directory.
+	if got := ToolDir(dir); got == dir {
+		t.Fatalf("a run without root rights would write into the install directory: %s", got)
+	}
+}

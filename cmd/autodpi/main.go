@@ -697,7 +697,7 @@ func runLab(args []string) {
 	if len(hosts) == 0 {
 		hosts = []string{"discord.com", "gateway.discord.gg", "roblox.com", "www.google.com"}
 	}
-	bins, err := embedded.Prepare(embedded.UserDir(paths.Default().Bin))
+	bins, err := embedded.Prepare(embedded.ToolDir(paths.Default().Bin))
 	if err != nil {
 		die("%v", err)
 	}

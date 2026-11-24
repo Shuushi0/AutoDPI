@@ -48,7 +48,7 @@ func Run(p paths.Set) []Check {
 	add(Check{Name: i18n.T("root yetkisi", "root privileges"), OK: root, Info: true,
 		Detail: map[bool]string{true: i18n.T("evet", "yes"), false: i18n.T("hayır (kurulum ve TUN için "+sysx.AdminHint()+" gerekir)", "no (installing and the TUN need "+sysx.AdminHint()+")")}[root]})
 
-	bins, err := embedded.Prepare(embedded.UserDir(p.Bin))
+	bins, err := embedded.Prepare(embedded.ToolDir(p.Bin))
 	if err != nil {
 		add(Check{Name: i18n.T("yardımcı ikili dosyalar", "helper binaries"), Detail: err.Error()})
 	} else {

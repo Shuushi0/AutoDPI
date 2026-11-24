@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- After an update, the folder you first unpacked AutoDPI into still holds the older version. A support
+  report or a network measurement started from that folder no longer tries to put its older helper
+  programs in place of the ones the installed service uses. On Windows that showed as a failed
+  "helper binaries" check with "access denied".
+
 ## 0.1.2 — 2026-11-24
 
 **AutoDPI is smaller**
